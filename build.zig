@@ -21,6 +21,18 @@ pub fn build(b: *std.Build) void {
     // through LLVM matches the working ReleaseSafe path.
     const llvm_backend = true;
 
+    // The SDK's audio analysis is the single source of truth for the FFT
+    // bands / kick detector, shared by built-in effects (via the bare
+    // `hg_audio` module import) and component effects (staged next to their
+    // source at compile-on-load time). Registering it here is what lets
+    // `src/effects/{spectral,bands}.zig` import a file under `sdk/`, which is
+    // outside the exe's `src/` module root.
+    const hg_audio_mod = b.createModule(.{
+        .root_source_file = b.path("sdk/hg_audio.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // --- main executable ---
     const exe = b.addExecutable(.{
         .name = "hyprglaze",
@@ -30,6 +42,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "toml", .module = toml_dep.module("toml") },
+                .{ .name = "hg_audio", .module = hg_audio_mod },
             },
         }),
         .use_llvm = llvm_backend,
@@ -38,6 +51,8 @@ pub fn build(b: *std.Build) void {
 
     // Generated protocol headers
     exe.root_module.addIncludePath(wl_protocols.include_path);
+    // The effect ABI header, imported by src/core/plugin.zig and the SDK.
+    exe.root_module.addIncludePath(b.path("sdk/include"));
     // Generated protocol C sources
     for (wl_protocols.sources) |src| {
         exe.root_module.addCSourceFile(.{ .file = src });
@@ -69,7 +84,22 @@ pub fn build(b: *std.Build) void {
         .install_subdir = "share/hyprglaze/shaders",
         .include_extensions = &.{".frag"},
     });
-    b.installFile("sprites/buddy.png", "share/hyprglaze/sprites/buddy.png");
+    // Component effects: each is its own directory with `effect.zig` and its
+    // shader. Compiled on load by the daemon (see src/core/plugin.zig).
+    b.installDirectory(.{
+        .source_dir = b.path("effects"),
+        .install_dir = .prefix,
+        .install_subdir = "share/hyprglaze/effects",
+        .include_extensions = &.{ ".zig", ".frag", ".toml" },
+    });
+    // The plugin SDK staged next to the components, so the daemon can compile
+    // them with a relative `@import("hg.zig")`.
+    b.installDirectory(.{
+        .source_dir = b.path("sdk"),
+        .install_dir = .prefix,
+        .install_subdir = "share/hyprglaze/sdk",
+        .include_extensions = &.{ ".zig", ".h" },
+    });
     b.installFile("contrib/hyprglaze.service", "lib/systemd/user/hyprglaze.service");
     b.installFile("contrib/hyprglaze@.service", "lib/systemd/user/hyprglaze@.service");
 
@@ -108,6 +138,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "toml", .module = toml_dep.module("toml") },
+                .{ .name = "hg_audio", .module = hg_audio_mod },
             },
         }),
         .use_llvm = llvm_backend,
@@ -115,6 +146,7 @@ pub fn build(b: *std.Build) void {
     });
     // watcher.zig calls libc (inotify, getenv) via std.c.
     tests.root_module.link_libc = true;
+    tests.root_module.addIncludePath(b.path("sdk/include"));
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }

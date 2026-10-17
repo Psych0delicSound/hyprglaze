@@ -17,7 +17,7 @@ A wallpaper daemon for Hyprland that renders GLSL shaders and modular effects on
 - Reloads config live via inotify, including switching effects on the fly
 - Eases focus transitions independently of frame rate; cursor and geometry smoothing are optional extras
 - Runs real simulations where an effect calls for one: substepped XPBD ball physics with windows as moving colliders, 2D laser ray tracing, space-limited plant growth
-- Includes an animated desktop buddy, optionally driven by Claude Haiku on AWS Bedrock
+- Includes an animated desktop buddy with procedural behaviors
 
 ## Effects
 
@@ -32,7 +32,6 @@ A wallpaper daemon for Hyprland that renders GLSL shaders and modular effects on
 | `visualizer` | Stereo waveform with Catmull-Rom interpolation, amplitude-driven palette colors |
 | `milkdrop` | MilkDrop-style visualizer: eleven presets of per-frame motion equations (zoom, rotation, warp, ripple, kaleidoscope) over a half-float feedback loop, with scope/circle/spectrum/spiral waveforms, custom shapes, borders and video echo, blending into each other through patterned transitions. One preset draws your windows into the loop. Dreams on a synthetic wave when no music plays |
 | `buddy` | Animated sprite character with procedural behaviors, palette-recolored |
-| `ai-buddy` | AI-driven buddy with mood system, emote particles, window awareness, wall climbing |
 | `glitch` | Circuit-bent video feedback: a camera filming its own monitor, with your window frames as the only light. Stutter, freezes, skipping and slit-scan playback, sync loss, mosaic, crude dither, all in the theme's surface tones with brief accent bursts; music speeds the bends up |
 | `tide` | Rising water line tied to wall-clock time, with teardrops and splash jets |
 | `fire` | Flames rise from window top edges; moving windows leave a directional wake |
@@ -70,7 +69,7 @@ zig build
 zig build run
 ```
 
-To install system-wide (binary, shaders, sprite sheet and the systemd user
+To install system-wide (binary, shaders, effects, SDK and the systemd user
 units, the same layout as the package):
 
 ```
@@ -79,11 +78,11 @@ sudo zig build -Doptimize=ReleaseSafe --prefix /usr
 
 ## Configuration
 
-`~/.config/hypr/hyprglaze.toml`:
+`~/.config/hypr/hyprglaze/hyprglaze.toml`:
 
 ```toml
 # Effects: particles, windowglow, cellbloom, concentric, fluid, starfield,
-#          visualizer, milkdrop, glitch, buddy, ai-buddy, tide, fire, swarm,
+#          visualizer, milkdrop, glitch, buddy, tide, fire, swarm,
 #          voltaic, moire, ivy, whorl, weft, crystal, fur, amorphous, laser,
 #          flux
 effect = "fluid"
@@ -191,12 +190,6 @@ count = 60            # balls (max 150)
 damping = 0.999       # per-1/30s velocity retention (air drag)
 pop_threshold = 50    # ball-ball impact speed that bursts a ball, px per 1/30s
 
-[buddy]
-scale = 2.0
-sprite = "sprites/buddy.png"
-ai_cooldown = 5.0
-max_calls_per_minute = 6
-
 [tide]
 start_hour = 6.0      # hour at which the tide is empty
 end_hour   = 24.0     # hour at which the tide is full
@@ -243,6 +236,29 @@ contour = false       # true = topographic isoline mode instead of blocks
 # sink = "..."        # PulseAudio monitor source (auto-detected by default)
 ```
 
+The config directory holds only the TOML; the daemon's assets live in the
+packaged data directory, `/usr/share/hyprglaze/`:
+
+```
+~/.config/hypr/hyprglaze/
+└── hyprglaze.toml     # this file
+
+/usr/share/hyprglaze/
+├── shaders/           # every shader-only effect's fragment shader, at any depth
+│   ├── fluid.frag
+│   ├── fire.frag
+│   └── <subdir>/      # any .frag under a subdir is selectable too
+│       └── mine.frag
+├── effects/<name>/    # component effects: effect.zig + its shader
+└── sdk/               # the plugin ABI (hg_plugin.h) and Zig helpers
+```
+
+`shaders/` is read on every invocation: `--list-effects` and startup both walk
+the tree recursively, so adding a `.frag` (or a whole subdirectory) makes a new
+effect selectable with no rebuild. Built-in effects keep their Zig context; a
+component under `effects/<name>/` is preferred and is compiled on load; any
+other name runs as a stateless shader.
+
 ### CLI
 
 ```
@@ -255,6 +271,46 @@ hyprglaze --help                  # full flag reference
 ```
 
 From source: substitute `zig build run --` for `hyprglaze`.
+
+### Custom shaders
+
+Any GLSL ES 3.0 fragment shader under `/usr/share/hyprglaze/shaders/` is a
+first-class effect. Drop it in and select it by its path relative to that tree:
+
+```toml
+effect = "customs/black-blue"   # -> /usr/share/hyprglaze/shaders/customs/black-blue.frag
+```
+
+Subdirectories are not special-cased — any depth works, and a top-level frag
+with no built-in of the same name is selectable by its bare stem
+(`effect = "black-blue"` -> `shaders/black-blue.frag`). The shaders tree is
+commonly a symlink into a personal shaders repo, so edits there are live.
+
+A `shader = "..."` key still overrides the effect's shader. It is resolved
+under the same tree (`~` and absolute paths also work); run `hyprglaze
+--list-effects` to see every name found on the current tree:
+
+```toml
+effect = "fluid"
+shader = "customs/black-blue.frag"
+```
+
+Restart to pick up a shader edit (the file is read when the effect is built):
+
+```sh
+pkill hyprglaze && setsid ~/.local/bin/hyprglaze >/dev/null 2>&1 < /dev/null &
+```
+
+A custom shader sees the standard uniforms (see [Shader Uniforms](#shader-uniforms))
+plus, when it declares them, `iWindowVel`/`iWindowAcc` — the focused window's
+velocity and acceleration, estimated host-side in `TransitionState`
+(`src/core/transition.zig`) and handled in `src/core/shader.zig`. Don't declare
+a uniform the shader doesn't use: locations resolve to -1 and are skipped.
+
+Compile errors and shader file problems are logged to the daemon's stdout —
+run it in a terminal (or capture its output to a file) while developing.
+Editing the TOML (`effect`, `theme`, …) hot-reloads via the inotify watcher;
+a shader file edit needs a restart.
 
 ### Multiple monitors
 
@@ -338,18 +394,6 @@ jumps = true          # occasional hyperspace jumps
 
 List available sinks with `pactl list short sinks`.
 
-### AI buddy (AWS Bedrock)
-
-The `ai-buddy` effect uses Claude Haiku via AWS Bedrock for decision-making. Create `~/.config/hypr/hyprglaze-aws.env`:
-
-```
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
-AWS_DEFAULT_REGION=us-east-1
-```
-
-Requires the `aws` CLI and model access enabled for `us.anthropic.claude-haiku-4-5-20251001-v1:0` in Bedrock.
-
 ## How it talks to Hyprland
 
 Most Hyprland companions poll the IPC socket for state. hyprglaze instead installs `src/core/watcher.lua` into the compositor's Lua VM at startup (and again after every config reload, which recreates that VM). The watcher runs a 16ms timer inside Hyprland, reads cursor and window state directly from compositor memory, and emits compact `custom>>hg:*` events on the socket2 event stream, but only when something actually changed.
@@ -389,13 +433,33 @@ Effects are free to upload their own uniforms and textures instead: `particles` 
 
 ## Adding an Effect
 
-1. Create `src/effects/myeffect.zig` with a `pub const Context` struct (or a directory for complex effects)
-2. Implement `init()`, `update(state)`, `upload(shader)`, `deinit()`
-3. Register in `src/effects.zig`: add the import and a tagged union variant. Init dispatch, the CLI name, and the default shader path are derived from the variant at comptime
-4. Add its shader at `shaders/myeffect.frag`
-5. Configure via a `[myeffect]` section in TOML, read params with `config_mod.EffectParams`
+Two ways, depending on how far you want the effect to live from the daemon:
 
-New effects are picked up by `--list-effects` automatically via comptime reflection on the `Effect` union.
+**Shader-only** — drop a `.frag` into
+`/usr/share/hyprglaze/shaders/` (any depth). It runs on the shared stateless
+context, sees the standard uniforms, and needs no Zig. `--list-effects` walks
+that tree on every invocation, so new files show up immediately.
+
+**Component** — a self-contained plugin under `/usr/share/hyprglaze/effects/<name>/`:
+
+1. Write `effect.zig`, exporting `hg_module_entry` and a `hg_module` vtable
+   (`create`/`update`/`upload`/`destroy`). Import the SDK: `@import("hg.zig")`,
+   with the C ABI in `sdk/include/hg_plugin.h`.
+2. Put its fragment shader next to it (`<name>.frag`, or a lone `.frag`).
+3. Set `effect = "<name>"` in the config. The daemon compiles the plugin on
+   first load (cached under `~/.cache/hyprglaze/`), `dlopen`s it, and drives it
+   through the ABI. GL belongs in `upload` and `create` is GL-free, mirroring
+   the built-in contract below.
+
+A built-in Zig effect (a `Context` in `src/effects/` registered in
+`src/effects.zig`) is still the way to add something tightly coupled to daemon
+internals. Its shader goes in `shaders/<name>.frag` and is resolved from the
+installed tree at runtime. Per-effect params live in a `[<name>]` TOML section
+(`config_mod.EffectParams`, or the host params bridge for plugins).
+
+Plugins are code: treat `/usr/share/hyprglaze/effects/` as trusted (root-owned).
+A component whose directory is group/other-writable, or owned by another user,
+is refused; `plugins = false` (or `HG_NO_PLUGINS=1`) disables loading entirely.
 
 A few rules keep effects safe across reloads and graphics rebuilds:
 

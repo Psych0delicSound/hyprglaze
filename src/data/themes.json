@@ -9123,5 +9123,29 @@
     "foreground": "#dcdccc",
     "cursor": "#dcdccc",
     "hash": "3b0e9781baafa8e4e9e171c666f0132e565fac5d0d69440369f7255758f73fe5"
+  },
+  {
+    "name": "Black Blue OLED",
+    "author": "",
+    "variant": "",
+    "color_01": "#000000",
+    "color_02": "#051a7a",
+    "color_03": "#2e8fff",
+    "color_04": "#59a6ff",
+    "color_05": "#f5f7ff",
+    "color_06": "#0a2fa0",
+    "color_07": "#6fb8ff",
+    "color_08": "#ffffff",
+    "color_09": "#3a55c0",
+    "color_10": "#a8d5ff",
+    "color_11": "#1240b0",
+    "color_12": "#1f6ee0",
+    "color_13": "#7cc0ff",
+    "color_14": "#4a9dff",
+    "color_15": "#d0e8ff",
+    "color_16": "#ffffff",
+    "background": "#000000",
+    "foreground": "#a8d5ff",
+    "cursor": "#2e8fff"
   }
 ]

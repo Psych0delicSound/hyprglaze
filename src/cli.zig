@@ -24,9 +24,12 @@ pub const usage_text =
     \\
     \\  --output NAME      Monitor to render on, per `hyprctl monitors`
     \\                     (default: the focused monitor at startup)
-    \\  --config PATH      TOML config path (default: ~/.config/hypr/hyprglaze.toml)
-    \\  --effect NAME      Effect to render (see --list-effects)
-    \\  --shader PATH      Fragment shader path (overrides effect default)
+    \\  --config PATH      TOML config path
+    \\                     (default: ~/.config/hypr/hyprglaze/hyprglaze.toml)
+    \\  --effect NAME      Effect to render (see --list-effects). A NAME with a
+    \\                     slash selects a shader under the installed shaders/ tree
+    \\  --shader PATH      Fragment shader, resolved under /usr/share/hyprglaze/
+    \\                     shaders unless absolute (overrides effect default)
     \\  --theme NAME       Gogh color scheme name
     \\  --set-theme NAME   Persist a theme to the config file and exit (hot-reloads)
     \\  --list-themes      List available themes and exit

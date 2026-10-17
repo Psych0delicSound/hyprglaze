@@ -91,6 +91,9 @@ pub const Config = struct {
     /// Whether `output_wait` was written in the file. The default depends
     /// on `output`, which `--output` can set after parsing.
     output_wait_set: bool,
+    /// `plugins` — load component effects from `effects/` and compile them on
+    /// demand. Default true; a kill switch for untrusted effect code.
+    plugins: bool,
     transition_duration: f32,
     /// `[transition] fade_in` — seconds to fade in from the theme
     /// background on launch and whenever the surface is rebuilt (a
@@ -199,6 +202,10 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8, source_path: []cons
         .output = output_dup,
         .output_wait = @max(0.0, output_wait),
         .output_wait_set = t.get("output_wait") != null,
+        .plugins = if (t.get("plugins")) |v| switch (v) {
+            .boolean => |b| b,
+            else => true,
+        } else true,
         .transition_duration = transition_params.getFloat("duration", 0.3),
         .fade_in = @max(0.0, transition_params.getFloat("fade_in", 1.0)),
         .cursor_smoothing = cursor_params.getFloat("smoothing", 0.0),
@@ -362,19 +369,58 @@ test "isThemeLine matches theme assignments only" {
     try std.testing.expect(!isThemeLine("effect = \"fire\""));
 }
 
-pub fn resolveConfigPath(allocator: std.mem.Allocator) ![]const u8 {
+/// The user configuration directory: `$XDG_CONFIG_HOME/hypr/hyprglaze`, or
+/// `~/.config/hypr/hyprglaze`. It holds `hyprglaze.toml` only; shaders and
+/// effects live under the packaged [`iohelp.system_data_dir`].
+pub fn configDir(allocator: std.mem.Allocator) ![]const u8 {
     if (std.c.getenv("XDG_CONFIG_HOME")) |config_home_z| {
         const config_home = std.mem.span(config_home_z);
-        const path = try std.fmt.allocPrint(allocator, "{s}/hypr/hyprglaze.toml", .{config_home});
-        if (iohelp.exists(path)) return path;
-        allocator.free(path);
+        if (config_home.len > 0)
+            return std.fmt.allocPrint(allocator, "{s}/hypr/hyprglaze", .{config_home});
     }
     if (std.c.getenv("HOME")) |home_z| {
         const home = std.mem.span(home_z);
-        const path = try std.fmt.allocPrint(allocator, "{s}/.config/hypr/hyprglaze.toml", .{home});
-        if (iohelp.exists(path)) return path;
-        allocator.free(path);
+        return std.fmt.allocPrint(allocator, "{s}/.config/hypr/hyprglaze", .{home});
     }
+    return error.NoConfigDir;
+}
+
+/// The default config file path inside [`configDir`].
+pub fn defaultConfigPath(allocator: std.mem.Allocator) ![]const u8 {
+    const dir = try configDir(allocator);
+    defer allocator.free(dir);
+    return std.fmt.allocPrint(allocator, "{s}/hyprglaze.toml", .{dir});
+}
+
+/// Packaged shader-only effects. Every `.frag` under it, at any depth, is a
+/// selectable effect (see `effects.listEffects`).
+pub const system_shaders_dir = iohelp.system_data_dir ++ "/shaders";
+
+/// Packaged component effects. Each `effects/<name>/` directory holds an
+/// `effect.zig` (compiled on load) and its fragment shader.
+pub const system_effects_dir = iohelp.system_data_dir ++ "/effects";
+
+/// Resolve a shader reference the way effects mean it: `~` expanded, an
+/// absolute path taken verbatim, and anything else relative to the packaged
+/// [`system_shaders_dir`]. Component shaders are resolved to an absolute path
+/// by `effects.defaultShaderFor` before reaching here. When the file exists
+/// nowhere, the candidate path is returned so the caller's error names the
+/// expected location. The returned slice is always owned by the caller.
+pub fn resolveShaderPath(allocator: std.mem.Allocator, ref: []const u8) ![]const u8 {
+    const expanded = try expandHome(allocator, ref);
+    if (std.fs.path.isAbsolute(expanded)) return expanded;
+
+    const cand = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ system_shaders_dir, expanded });
+    allocator.free(expanded);
+    return cand;
+}
+
+/// Existing config path, or `error.ConfigNotFound`. The config lives inside
+/// [`configDir`]; the flat, pre-directory layout is not read.
+pub fn resolveConfigPath(allocator: std.mem.Allocator) ![]const u8 {
+    const path = try defaultConfigPath(allocator);
+    if (iohelp.exists(path)) return path;
+    allocator.free(path);
     return error.ConfigNotFound;
 }
 
@@ -498,6 +544,27 @@ test "expandHome leaves absolute paths alone" {
     const out = try expandHome(std.testing.allocator, "/etc/foo");
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("/etc/foo", out);
+}
+
+test "resolveShaderPath passes absolute paths through untouched" {
+    const out = try resolveShaderPath(std.testing.allocator, "/tmp/custom.frag");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("/tmp/custom.frag", out);
+}
+
+test "resolveShaderPath resolves relative refs under the system shaders dir" {
+    const out = try resolveShaderPath(std.testing.allocator, "particles.frag");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("/usr/share/hyprglaze/shaders/particles.frag", out);
+}
+
+test "defaultConfigPath sits in the config dir" {
+    // HOME is always set for the test runner; the config tree is
+    // <config>/hypr/hyprglaze/hyprglaze.toml. Shaders and effects live under
+    // the packaged system data dir, not here.
+    const cfg = try defaultConfigPath(std.testing.allocator);
+    defer std.testing.allocator.free(cfg);
+    try std.testing.expect(std.mem.endsWith(u8, cfg, "/hypr/hyprglaze/hyprglaze.toml"));
 }
 
 test "parse empty config uses defaults" {

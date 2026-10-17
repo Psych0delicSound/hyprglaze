@@ -45,6 +45,15 @@ pub const TransitionState = struct {
     // Timing for frame-rate independent smoothing
     last_time: f64 = 0,
 
+    /// Focused-window velocity and acceleration in px/s and px/s², GL
+    /// space (y up), exponentially smoothed. Sampled from the animated
+    /// raw geometry, so it includes Hyprland's move animation.
+    win_vel: [2]f32 = .{ 0, 0 },
+    win_acc: [2]f32 = .{ 0, 0 },
+    win_vel_prev: [2]f32 = .{ 0, 0 },
+    win_center_prev: [2]f32 = .{ 0, 0 },
+    win_center_init: bool = false,
+
     pub fn init() TransitionState {
         return .{};
     }
@@ -72,6 +81,13 @@ pub const TransitionState = struct {
                 self.transition_start = time;
                 self.transition_progress = 0;
                 if (raw_win.hasArea()) self.current_win = raw_win;
+                // A focus commit is not motion of one window; reset the
+                // kinematic estimate so the old window's velocity doesn't
+                // read as the new one's.
+                self.win_vel = .{ 0, 0 };
+                self.win_acc = .{ 0, 0 };
+                self.win_vel_prev = .{ 0, 0 };
+                self.win_center_init = false;
                 self.pending_address = 0;
             }
         } else if (win_address == self.focused_address) {
@@ -91,6 +107,26 @@ pub const TransitionState = struct {
         // window. Skipping during a pending (non-committed) focus flicker
         // keeps current_win on the window the user is actively engaged with.
         if (raw_win.hasArea() and win_address == self.focused_address) {
+            // Kinematics: center velocity, then its derivative. Both pass
+            // through a frame-rate independent exponential smoothing so
+            // the sampled animation curve doesn't alias into jitter.
+            const cx = raw_win.x + raw_win.w * 0.5;
+            const cy = raw_win.y + raw_win.h * 0.5;
+            if (self.win_center_init and dt > 0.001) {
+                const iv = 1.0 / dt;
+                const kv = 1.0 - @exp(-dt * 10.0);
+                self.win_vel[0] += ((cx - self.win_center_prev[0]) * iv - self.win_vel[0]) * kv;
+                self.win_vel[1] += ((cy - self.win_center_prev[1]) * iv - self.win_vel[1]) * kv;
+                const ka = 1.0 - @exp(-dt * 8.0);
+                self.win_acc[0] += ((self.win_vel[0] - self.win_vel_prev[0]) * iv - self.win_acc[0]) * ka;
+                self.win_acc[1] += ((self.win_vel[1] - self.win_vel_prev[1]) * iv - self.win_acc[1]) * ka;
+                self.win_vel_prev[0] = self.win_vel[0];
+                self.win_vel_prev[1] = self.win_vel[1];
+            }
+            self.win_center_prev[0] = cx;
+            self.win_center_prev[1] = cy;
+            self.win_center_init = true;
+
             const ag = smoothAlpha(self.geometry_smoothing, dt);
             self.current_win.x += (raw_win.x - self.current_win.x) * ag;
             self.current_win.y += (raw_win.y - self.current_win.y) * ag;

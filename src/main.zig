@@ -48,16 +48,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (cli.list_effects) {
-        try effects.listEffects();
+        try effects.listEffects(allocator);
         return;
     }
     if (cli.set_theme) |name| {
         const path = config_mod.resolveConfigPath(allocator) catch |err| switch (err) {
-            error.ConfigNotFound => blk: {
-                const home_z = std.c.getenv("HOME") orelse return error.NoHomeDir;
-                const home = std.mem.span(home_z);
-                break :blk try std.fmt.allocPrint(allocator, "{s}/.config/hypr/hyprglaze.toml", .{home});
-            },
+            error.ConfigNotFound => try config_mod.defaultConfigPath(allocator),
             else => return err,
         };
         defer allocator.free(path);
@@ -70,21 +66,27 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var cfg = try loadConfig(allocator, &cli);
     defer config_mod.deinit(&cfg, allocator);
 
-    // Resolve shader: explicit config > effect default. Checked here, before
+    // Resolve shader: explicit config > effect default. Both are resolved
+    // against the installed shaders tree (see config_mod.resolveShaderPath;
+    // component effects resolve to their own frag) and checked here, before
     // Wayland, so a bad effect name or shader path fails fast. The effect
     // itself is built by the Renderer once the surface exists and its real
     // size is known (audio effects also start capture in init).
-    const default_shader = effects.Effect.defaultShaderFor(cfg.effect) orelse {
-        log.err("unknown effect: '{s}'. Available: {s}", .{ cfg.effect, effects.effect_names_csv });
-        return error.UnknownEffect;
-    };
-    const shader_path = if (cfg.shader.len > 0) cfg.shader else default_shader;
+    const default_shader = effects.Effect.defaultShaderFor(cfg.effect) orelse cfg.effect;
+    const shader_ref = if (cfg.shader.len > 0) cfg.shader else default_shader;
     log.info("effect: {s}", .{cfg.effect});
-    log.info("shader: {s}", .{shader_path});
+    log.info("shader: {s}", .{shader_ref});
     if (cfg.theme) |t| log.info("theme: {s}", .{t});
 
-    const shader_path_expanded = try config_mod.expandHome(allocator, shader_path);
+    const shader_path_expanded = try config_mod.resolveShaderPath(allocator, shader_ref);
     defer allocator.free(shader_path_expanded);
+
+    if (!iohelp.exists(shader_path_expanded)) {
+        log.err("shader not found: '{s}'", .{shader_path_expanded});
+        log.err("available effects:", .{});
+        try effects.listEffects(allocator);
+        return error.ShaderNotFound;
+    }
 
     const frag_source = renderer_mod.loadShaderFile(allocator, shader_path_expanded) catch |err| {
         log.err("failed to load shader '{s}': {}", .{ shader_path_expanded, err });

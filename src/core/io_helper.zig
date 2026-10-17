@@ -146,6 +146,20 @@ pub const libc = struct {
     pub extern "c" fn pclose(stream: *anyopaque) c_int;
     pub extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *anyopaque) usize;
     pub const SHUT_RDWR: c_int = 2;
+
+    // Directory walking. libc readdir instead of std.Io.Dir.iterate: the
+    // Threaded Io dir iterator mishandles directory reads here (spurious
+    // BADF), and discovery runs once per CLI invocation / config load.
+    pub const Dirent = extern struct {
+        d_ino: u64,
+        d_off: i64,
+        d_reclen: u16,
+        d_type: u8,
+        d_name: [256]u8,
+    };
+    pub extern "c" fn opendir(path: [*:0]const u8) ?*anyopaque;
+    pub extern "c" fn readdir(dirp: *anyopaque) ?*Dirent;
+    pub extern "c" fn closedir(dirp: *anyopaque) void;
 };
 
 /// Auto-detect the user's default PulseAudio sink and write its `.monitor`

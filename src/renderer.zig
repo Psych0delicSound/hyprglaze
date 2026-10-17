@@ -260,6 +260,8 @@ pub const Renderer = struct {
             .win_w = trans.current_win.w,
             .win_h = trans.current_win.h,
             .transition = trans.transition_progress,
+            .win_vel = trans.win_vel,
+            .win_acc = trans.win_acc,
             .windows = scene.windows.*,
             .window_count = scene.window_count,
             .focused_index = focused_index,
@@ -362,9 +364,12 @@ pub const Renderer = struct {
         self.install(fresh);
         log.info("effect {s}: {s}", .{ if (name_changed) "switched" else "reloaded", new.effect });
 
-        // Shader — explicit config, else the effect's default.
-        const desired = if (new.shader.len > 0) new.shader else self.fx().defaultShader();
-        const new_path = try config_mod.expandHome(self.allocator, desired);
+        // Shader — explicit config, else the effect name's default. Resolved
+        // from the installed shaders tree (or the component's own frag),
+        // keyed on the incoming effect name (not the live variant, which for
+        // a user shader is just `custom`).
+        const desired = if (new.shader.len > 0) new.shader else (effects.Effect.defaultShaderFor(new.effect) orelse new.effect);
+        const new_path = try config_mod.resolveShaderPath(self.allocator, desired);
         if (std.mem.eql(u8, new_path, self.shader_path)) {
             self.allocator.free(new_path);
             if (self.pal) |*p| self.prog.setPalette(p);

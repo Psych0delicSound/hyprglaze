@@ -37,6 +37,8 @@ pub const ShaderProgram = struct {
     i_windows: [max_windows]c.GLint,
     i_window_count: c.GLint,
     i_transition: c.GLint,
+    i_win_vel: c.GLint,
+    i_win_acc: c.GLint,
     i_focused_index: c.GLint,
     i_prev_index: c.GLint,
     i_particles: [max_particles]c.GLint,
@@ -110,6 +112,8 @@ pub const ShaderProgram = struct {
             },
             .i_window_count = c.glGetUniformLocation(program, "iWindowCount"),
             .i_transition = c.glGetUniformLocation(program, "iTransition"),
+            .i_win_vel = c.glGetUniformLocation(program, "iWindowVel"),
+            .i_win_acc = c.glGetUniformLocation(program, "iWindowAcc"),
             .i_focused_index = c.glGetUniformLocation(program, "iFocusedIndex"),
             .i_prev_index = c.glGetUniformLocation(program, "iPrevIndex"),
             .i_particles = blk2: {
@@ -165,6 +169,10 @@ pub const ShaderProgram = struct {
         win_w: f32 = 0,
         win_h: f32 = 0,
         transition: f32 = 1.0,
+        /// Focused-window velocity and acceleration, px/s and px/s² in GL
+        /// space — from TransitionState's kinematic estimate.
+        win_vel: [2]f32 = .{ 0, 0 },
+        win_acc: [2]f32 = .{ 0, 0 },
         windows: [max_windows]WindowRect = undefined,
         window_count: u8 = 0,
         focused_index: i32 = -1,
@@ -198,6 +206,10 @@ pub const ShaderProgram = struct {
             c.glUniform4f(self.i_window, u.win_x, u.win_y, u.win_w, u.win_h);
         if (self.i_transition >= 0)
             c.glUniform1f(self.i_transition, u.transition);
+        if (self.i_win_vel >= 0)
+            c.glUniform2f(self.i_win_vel, u.win_vel[0], u.win_vel[1]);
+        if (self.i_win_acc >= 0)
+            c.glUniform2f(self.i_win_acc, u.win_acc[0], u.win_acc[1]);
         if (self.i_focused_index >= 0)
             c.glUniform1i(self.i_focused_index, u.focused_index);
         if (self.i_prev_index >= 0)

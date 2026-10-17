@@ -8,7 +8,14 @@ zig-pkg/
 *.swp
 *.swo
 
-# Credentials (hyprglaze-aws.env and the like) — NEVER commit
+# Dev-only local artifacts: a symlink to /usr/bin/zig, the live config
+# symlinked back from ~/.config/hypr/hyprglaze/, the personal shaders tree, and
+# a local restart helper. None of these belong in the repo.
+/zig
+/hyprglaze.toml
+/shaders/customs
+/restart.sh
+
 *.env
 
 # Aseprite source files

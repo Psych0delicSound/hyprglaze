@@ -10,5 +10,13 @@ Restart=on-failure
 RestartSec=2
 TimeoutStopSec=5
 
+# Harden the daemon. It only needs the session sockets (Wayland, Hyprland IPC,
+# PulseAudio — all AF_UNIX) and read access to /usr/share/hyprglaze; plugin
+# compilation writes to ~/.cache, so $HOME stays writable.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
 [Install]
 WantedBy=graphical-session.target

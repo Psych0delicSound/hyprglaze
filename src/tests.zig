@@ -2,6 +2,7 @@ test {
     _ = @import("cli.zig");
     _ = @import("strip.zig");
     _ = @import("core/config.zig");
+    _ = @import("core/plugin.zig");
     _ = @import("core/io_helper.zig");
     _ = @import("core/palette.zig");
     _ = @import("core/watcher.zig");
@@ -14,5 +15,4 @@ test {
     _ = @import("effects/particles/system.zig");
     _ = @import("effects/laser/trace.zig");
     _ = @import("effects/clock.zig");
-    _ = @import("effects/buddy/sprite.zig");
 }
