@@ -40,13 +40,14 @@ const sdk_header_path = sdk_include_dir ++ "/hg_plugin.h";
 /// Zig SDK modules staged next to every component source, so `@import("hg.zig")`
 /// (and `hg.audio`) resolve. Kept in the cache key. Add new SDK `.zig` files
 /// here.
-const sdk_modules = [_][]const u8{ "hg.zig", "hg_audio.zig" };
+const sdk_modules = [_][]const u8{ "hg.zig", "hg_audio.zig", "hg_gl.zig" };
 
 /// Arguments after the source path for every component compile. Kept in the
 /// cache key, so changing a flag recompiles.
 const compile_flags = "-dynamic -fPIC -OReleaseFast -lc -lGLESv2";
 const max_source = 1 << 20; // 1 MiB cap on any compiled source file
 const max_windows = shader_mod.max_windows;
+const max_component_files = 64; // .zig files a single component may hold
 
 // --- discovery ---------------------------------------------------------------
 
@@ -74,6 +75,45 @@ fn hasEffectSource(dir: []const u8) bool {
     var buf: [1024]u8 = undefined;
     const src = std.fmt.bufPrint(&buf, "{s}/effect.zig", .{dir}) catch return false;
     return iohelp.exists(src);
+}
+
+/// The `.zig` files in a component directory, sorted by name. A component may
+/// spread itself over several files (e.g. swarm's `boids.zig`); all of them are
+/// staged and hashed so a change to any one recompiles it, in a stable order
+/// across filesystems. Caller frees each name via `freeSources`. `effect.zig` is
+/// always among them (the directory passed `hasEffectSource`).
+fn componentSources(allocator: std.mem.Allocator, dir: []const u8) ![]const []const u8 {
+    const libc = iohelp.libc;
+    var dir_z_buf: [640]u8 = undefined;
+    const dir_z = std.fmt.bufPrintZ(&dir_z_buf, "{s}", .{dir}) catch return error.PathTooLong;
+    const d = libc.opendir(dir_z.ptr) orelse return error.OpenDirFailed;
+    defer libc.closedir(d);
+
+    var stack: [max_component_files][]const u8 = undefined;
+    var n: usize = 0;
+    while (libc.readdir(d)) |de| {
+        const fname = std.mem.sliceTo(&de.d_name, 0);
+        if (fname.len <= 4 or fname[0] == '.') continue;
+        if (!std.mem.endsWith(u8, fname, ".zig")) continue;
+        if (n == stack.len) return error.TooManySources;
+        stack[n] = try allocator.dupe(u8, fname);
+        n += 1;
+    }
+    const out = try allocator.alloc([]const u8, n);
+    @memcpy(out, stack[0..n]);
+    // Insertion sort: n is tiny, and it keeps the hash order deterministic.
+    for (1..n) |i| {
+        var j = i;
+        while (j > 0 and std.mem.order(u8, out[j - 1], out[j]) == .gt) : (j -= 1) {
+            std.mem.swap([]const u8, &out[j - 1], &out[j]);
+        }
+    }
+    return out;
+}
+
+fn freeSources(allocator: std.mem.Allocator, sources: []const []const u8) void {
+    for (sources) |s| allocator.free(s);
+    allocator.free(sources);
 }
 
 /// The component directory for `name`, or null. Caller owns the returned path.
@@ -190,11 +230,19 @@ fn loadModule(name: []const u8, dir: []const u8) !*Loaded {
     if (cache.get(name)) |l| return l;
 
     const gpa = std.heap.c_allocator;
-    const effect_src = try std.fmt.allocPrint(gpa, "{s}/effect.zig", .{dir});
-    defer gpa.free(effect_src);
 
-    const src_bytes = try iohelp.readFileAlloc(gpa, effect_src, max_source);
-    defer gpa.free(src_bytes);
+    // Every `.zig` in the component directory (multi-file components stage the
+    // whole set), read so both the cache key and the compile see them.
+    const sources = try componentSources(gpa, dir);
+    defer freeSources(gpa, sources);
+    const srcs = try gpa.alloc([]u8, sources.len);
+    defer gpa.free(srcs);
+    for (sources, 0..) |sname, i| {
+        const p = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, sname });
+        defer gpa.free(p);
+        srcs[i] = try iohelp.readFileAlloc(gpa, p, max_source);
+    }
+    defer for (srcs) |b| gpa.free(b);
 
     // Every staged SDK module plus the header feed the cache key, so a change
     // to the SDK recompiles every component.
@@ -209,7 +257,7 @@ fn loadModule(name: []const u8, dir: []const u8) !*Loaded {
     defer gpa.free(sdk_h);
 
     var hex: [16]u8 = undefined;
-    computeHash(&hex, src_bytes, &sdk_bytes, sdk_h);
+    computeHash(&hex, sources, srcs, &sdk_bytes, sdk_h);
 
     const root = try cacheDir();
     defer gpa.free(root);
@@ -217,7 +265,7 @@ fn loadModule(name: []const u8, dir: []const u8) !*Loaded {
     defer gpa.free(so_path);
 
     if (!iohelp.exists(so_path)) {
-        try compile(name, root, src_bytes, &sdk_bytes, hex, so_path);
+        try compile(name, root, sources, srcs, &sdk_bytes, hex, so_path);
     }
 
     var z_buf: [1024]u8 = undefined;
@@ -242,12 +290,21 @@ fn loadModule(name: []const u8, dir: []const u8) !*Loaded {
     return loaded;
 }
 
-fn computeHash(out: *[16]u8, src: []const u8, sdk: []const []const u8, sdk_h: []const u8) void {
+fn computeHash(
+    out: *[16]u8,
+    names: []const []const u8,
+    srcs: []const []const u8,
+    sdk: []const []const u8,
+    sdk_h: []const u8,
+) void {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(std.mem.asBytes(&abi_version));
     hasher.update(builtin.zig_version_string);
     hasher.update(compile_flags);
-    hasher.update(src);
+    for (names, srcs) |n, bytes| {
+        hasher.update(n);
+        hasher.update(bytes);
+    }
     for (sdk) |bytes| hasher.update(bytes);
     hasher.update(sdk_h);
     var digest: [32]u8 = undefined;
@@ -258,7 +315,8 @@ fn computeHash(out: *[16]u8, src: []const u8, sdk: []const []const u8, sdk_h: []
 fn compile(
     name: []const u8,
     cache_root: []const u8,
-    src_bytes: []const u8,
+    sources: []const []const u8,
+    srcs: []const []const u8,
     sdk: []const []const u8,
     hex: [16]u8,
     out_so: []const u8,
@@ -268,14 +326,19 @@ fn compile(
     defer gpa.free(build_dir);
     iohelp.makePath(build_dir) catch return error.MakeDirFailed;
 
-    const staged_effect = try std.fmt.allocPrint(gpa, "{s}/effect.zig", .{build_dir});
-    defer gpa.free(staged_effect);
-    try iohelp.writeFile(staged_effect, src_bytes);
+    for (sources, srcs) |sname, bytes| {
+        const staged = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ build_dir, sname });
+        defer gpa.free(staged);
+        try iohelp.writeFile(staged, bytes);
+    }
     for (sdk_modules, sdk) |mod, bytes| {
         const staged = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ build_dir, mod });
         defer gpa.free(staged);
         try iohelp.writeFile(staged, bytes);
     }
+
+    const staged_effect = try std.fmt.allocPrint(gpa, "{s}/effect.zig", .{build_dir});
+    defer gpa.free(staged_effect);
 
     const tmp_so = try std.fmt.allocPrint(gpa, "{s}.tmp.so", .{out_so});
     defer gpa.free(tmp_so);
@@ -313,7 +376,9 @@ fn compile(
         else => false,
     };
     if (!ok) {
-        log.err("effect '{s}': compile failed:\n{s}", .{ name, res.stderr });
+        log.err("effect '{s}': compile failed (term={any}):\n--- stderr ---\n{s}\n--- stdout ---\n{s}", .{
+            name, res.term, res.stderr, res.stdout,
+        });
         return error.CompileFailed;
     }
     try iohelp.rename(tmp_so, out_so);
@@ -508,21 +573,29 @@ test "validName accepts plain effect names and rejects traversal" {
 test "computeHash is deterministic and sensitive to every input" {
     const sdk = [_][]const u8{"hg"};
     const sdk_b = [_][]const u8{"hg2"};
+    const names = [_][]const u8{"effect.zig"};
+    const srcs = [_][]const u8{"src"};
+    const srcs_b = [_][]const u8{"src2"};
+    const names_b = [_][]const u8{"helper.zig"};
     var a: [16]u8 = undefined;
     var b: [16]u8 = undefined;
-    computeHash(&a, "src", &sdk, "header");
-    computeHash(&b, "src", &sdk, "header");
+    computeHash(&a, &names, &srcs, &sdk, "header");
+    computeHash(&b, &names, &srcs, &sdk, "header");
     try std.testing.expectEqualStrings(&a, &b);
 
     var src2: [16]u8 = undefined;
-    computeHash(&src2, "src2", &sdk, "header");
+    computeHash(&src2, &names, &srcs_b, &sdk, "header");
     try std.testing.expect(!std.mem.eql(u8, &a, &src2));
 
+    var name2: [16]u8 = undefined;
+    computeHash(&name2, &names_b, &srcs, &sdk, "header");
+    try std.testing.expect(!std.mem.eql(u8, &a, &name2));
+
     var sdk2: [16]u8 = undefined;
-    computeHash(&sdk2, "src", &sdk_b, "header");
+    computeHash(&sdk2, &names, &srcs, &sdk_b, "header");
     try std.testing.expect(!std.mem.eql(u8, &a, &sdk2));
 
     var hdr2: [16]u8 = undefined;
-    computeHash(&hdr2, "src", &sdk, "header2");
+    computeHash(&hdr2, &names, &srcs, &sdk, "header2");
     try std.testing.expect(!std.mem.eql(u8, &a, &hdr2));
 }

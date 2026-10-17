@@ -57,15 +57,21 @@ Run it detached with output captured — shader compile errors land in that log.
   truth for the numbers: `src/effects/spectral.zig` and `src/effects/bands.zig`
   are now thin host shims re-exporting it (spectral adds the capture-owning
   `Analyzer`), and components use it as `hg.audio` (`hg.zig` re-exports the
-  file). `plugin.zig` stages every entry in `sdk_modules` next to the component
-  source and folds them into the cache key, so a component may `@import`
-  `hg.zig`/`hg_audio.zig`; add new SDK `.zig` files to that list.
+  file).
+  `sdk/hg_gl.zig` — a GL `Program` helper for heavy effects that render their
+  own offscreen pass: fullscreen-triangle VAO plus the standard
+  `iResolution`/`iWindows`/`iPalette*` uniforms, built lazily in `upload`.
+  `plugin.zig` stages every `.zig` file in a component directory (multi-file
+  components are supported — see swarm) plus every entry in `sdk_modules` (add
+  new SDK `.zig` files there) and folds them into the cache key, so a component
+  may `@import("hg.zig")`/`hg_audio.zig`/`hg_gl.zig`.
 - `effects/<name>/` — a component effect: `effect.zig` (exports
   `hg_module_entry`) plus its shader (`<name>.frag`). Installed to
   `/usr/share/hyprglaze/effects/`. A component takes audio from the host —
   it never opens its own capture; set `wants_audio = 1` and read
   `hg_frame.wave` through `hg.audio.Analyzer`. `weft` (no audio need beyond the
-  raw waveform) and `crystal` (FFT bands + kicks) are the two worked examples.
+  raw waveform), `crystal` (FFT bands + kicks) and `swarm` (boids + a compute
+  pass, spread over `boids.zig`/`clock.zig`/`rect.zig`) are the worked examples.
 - `shaders/<name>.frag` — one frag per built-in, GLSL ES 3.0, Shadertoy-style
   uniforms. See the README's Shader Uniforms table for the exact list. At
   runtime these are resolved from the installed tree
