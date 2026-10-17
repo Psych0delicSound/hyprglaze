@@ -42,9 +42,12 @@ const sdk_header_path = sdk_include_dir ++ "/hg_plugin.h";
 /// here.
 const sdk_modules = [_][]const u8{ "hg.zig", "hg_audio.zig", "hg_gl.zig" };
 
-/// Arguments after the source path for every component compile. Kept in the
-/// cache key, so changing a flag recompiles.
-const compile_flags = "-dynamic -fPIC -OReleaseFast -lc -lGLESv2";
+/// Arguments after the source path for every component compile, and folded
+/// into the cache key so a change recompiles. `-fstrip` drops debug info and the
+/// symbol table (the `.so` is much smaller and links/loads faster); rebuild
+/// without it to keep symbols for crash backtraces. The compiler argv is built
+/// from this list so the two can never diverge.
+const compile_flags = [_][]const u8{ "-dynamic", "-fPIC", "-OReleaseFast", "-fstrip", "-lc", "-lGLESv2" };
 const max_source = 1 << 20; // 1 MiB cap on any compiled source file
 const max_windows = shader_mod.max_windows;
 const max_component_files = 64; // .zig files a single component may hold
@@ -300,7 +303,7 @@ fn computeHash(
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(std.mem.asBytes(&abi_version));
     hasher.update(builtin.zig_version_string);
-    hasher.update(compile_flags);
+    for (compile_flags) |flag| hasher.update(flag);
     for (names, srcs) |n, bytes| {
         hasher.update(n);
         hasher.update(bytes);
@@ -345,12 +348,27 @@ fn compile(
 
     const emit_arg = try std.fmt.allocPrint(gpa, "-femit-bin={s}", .{tmp_so});
     defer gpa.free(emit_arg);
-    const argv = [_][]const u8{
-        "zig",           "build-lib", staged_effect,
-        "-dynamic",      "-fPIC",     "-OReleaseFast",
-        "-lc",           "-lGLESv2",  "-I",
-        sdk_include_dir, emit_arg,
-    };
+    // One source of truth with the cache key: argv is
+    //   zig build-lib <effect.zig> <compile_flags...> -I <include> <emit>
+    var argv_buf: [compile_flags.len + 6][]const u8 = undefined;
+    var argc: usize = 0;
+    argv_buf[argc] = "zig";
+    argc += 1;
+    argv_buf[argc] = "build-lib";
+    argc += 1;
+    argv_buf[argc] = staged_effect;
+    argc += 1;
+    for (compile_flags) |flag| {
+        argv_buf[argc] = flag;
+        argc += 1;
+    }
+    argv_buf[argc] = "-I";
+    argc += 1;
+    argv_buf[argc] = sdk_include_dir;
+    argc += 1;
+    argv_buf[argc] = emit_arg;
+    argc += 1;
+    const argv = argv_buf[0..argc];
     log.info("effect '{s}': compiling plugin", .{name});
     // The daemon's global Io is the single-threaded one, whose allocator is
     // `.failing` and environment is empty; process spawning needs both a real
@@ -362,7 +380,7 @@ fn compile(
     var threaded = std.Io.Threaded.init(gpa, .{ .environ = .{ .block = env_block } });
     defer threaded.deinit();
     const res = std.process.run(gpa, threaded.io(), .{
-        .argv = &argv,
+        .argv = argv,
         .cwd = .{ .path = build_dir },
     }) catch |err| {
         log.err("effect '{s}': could not run the compiler: {}", .{ name, err });
