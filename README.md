@@ -55,12 +55,6 @@ Developed and tested against 0.56.2. The watcher reads the monitor list through 
 
 ## Install (Arch Linux)
 
-### From AUR
-
-```
-yay -S hyprglaze-git
-```
-
 ### From source
 
 ```
