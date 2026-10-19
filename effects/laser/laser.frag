@@ -3,7 +3,7 @@ precision highp float;
 
 uniform vec3 iResolution;
 
-// Beam legs from laser/context.zig: (x1, y1, x2, y2) and intensity, two
+// Beam legs from effects/laser/effect.zig: (x1, y1, x2, y2) and intensity, two
 // beams back to back. Legs from iLaserSplit on are the second beam. A
 // beam's first leg starts at its emitter; every later leg at a bounce.
 uniform vec4 iLaserSeg[64];

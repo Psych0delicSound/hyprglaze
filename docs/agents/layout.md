@@ -47,17 +47,20 @@ below.
   `sdk/hg_geometry.zig` — the shared CPU→GL painter (`Batch`/`Painter`,
   `Points`/`PointPainter`); `src/effects/geometry.zig` is a re-export shim so
   built-ins and components share one copy.
+  `sdk/hg_clock.zig` — the shared f64 effect clock (`phase`/`cycles`);
+  `src/effects/clock.zig` is a re-export shim, so built-ins and components turn
+  a long clock into exact f32 oscillator arguments through one copy.
   `plugin.zig` stages every `.zig` file in a component directory (multi-file
   components are supported — see swarm) plus every entry in `sdk_modules` (add
   new SDK `.zig` files there) and folds them into the cache key, so a component
-  may `@import("hg.zig")`/`hg_audio.zig`/`hg_gl.zig`/`hg_geometry.zig`.
+  may `@import("hg.zig")`/`hg_audio.zig`/`hg_gl.zig`/`hg_geometry.zig`/`hg_clock.zig`.
 - `effects/<name>/` — a component effect: `effect.zig` (exports
   `hg_module_entry`) plus its shader (`<name>.frag`). Installed to
   `/usr/share/hyprglaze/effects/`. A component takes audio from the host —
   it never opens its own capture; set `wants_audio = 1` and read
   `hg_frame.wave` through `hg.audio.Analyzer`. `weft`, `crystal`, `swarm`
-  (multi-file), `glitch`, `starfield`, `milkdrop` and `laser` are the worked
-  examples;
+  (multi-file), `glitch`, `starfield`, `milkdrop`, `laser` and `particles` are
+  the worked examples;
   see `docs/effect-porting.md` for the per-effect port recipe.
 - `shaders/<name>.frag` — one frag per built-in, GLSL ES 3.0, Shadertoy-style
   uniforms. See the README's Shader Uniforms table for the exact list. At

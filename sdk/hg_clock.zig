@@ -3,6 +3,9 @@
 //! after a few days, which a wallpaper that runs for a whole session
 //! reaches. These turn a long clock into small, exact f32 arguments for
 //! CPU-side oscillators.
+//!
+//! Shared by built-in effects (via `src/effects/clock.zig`) and component
+//! effects (staged next to their source as `hg_clock.zig`).
 
 const std = @import("std");
 

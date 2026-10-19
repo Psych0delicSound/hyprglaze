@@ -42,6 +42,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // The shared f64 effect clock. `src/effects/clock.zig` re-exports this so
+    // the built-ins and the swarm/laser components share one implementation.
+    const hg_clock_mod = b.createModule(.{
+        .root_source_file = b.path("sdk/hg_clock.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // --- main executable ---
     const exe = b.addExecutable(.{
         .name = "hyprglaze",
@@ -53,6 +61,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "toml", .module = toml_dep.module("toml") },
                 .{ .name = "hg_audio", .module = hg_audio_mod },
                 .{ .name = "hg_geometry", .module = hg_geometry_mod },
+                .{ .name = "hg_clock", .module = hg_clock_mod },
             },
         }),
         .use_llvm = llvm_backend,
@@ -150,6 +159,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "toml", .module = toml_dep.module("toml") },
                 .{ .name = "hg_audio", .module = hg_audio_mod },
                 .{ .name = "hg_geometry", .module = hg_geometry_mod },
+                .{ .name = "hg_clock", .module = hg_clock_mod },
             },
         }),
         .use_llvm = llvm_backend,

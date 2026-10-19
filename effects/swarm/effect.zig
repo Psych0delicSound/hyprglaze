@@ -2,9 +2,10 @@
 //! a hawk.
 //!
 //! Ported from the built-in `src/effects/swarm/context.zig` to the component
-//! ABI. The flock simulation (`boids.zig`), its clock (`clock.zig`) and the
-//! window rectangle it steers around (`rect.zig`) travel with the component;
-//! everything else comes from the host through `hg_frame`:
+//! ABI. The flock simulation (`boids.zig`) and the window rectangle it steers
+//! around (`rect.zig`) travel with the component; the f64 clock is the shared
+//! `hg_clock.zig` staged by the loader. Everything else comes from the host
+//! through `hg_frame`:
 //!
 //!   * audio is host-captured — the six-band/beat `hg.audio.Splitter` runs on
 //!     `hg_frame.wave` instead of owning a capture thread;

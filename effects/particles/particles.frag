@@ -3,7 +3,7 @@ precision highp float;
 
 uniform vec3 iResolution;
 
-// Balls from particles/context.zig, two vec4 each:
+// Balls from effects/particles/effect.zig, two vec4 each:
 //   (x, y, radius, colour seed), (streak tail x, y, 0, 0)
 uniform vec4 iBalls[300];
 uniform int iBallCount;

@@ -40,7 +40,7 @@ const sdk_header_path = sdk_include_dir ++ "/hg_plugin.h";
 /// Zig SDK modules staged next to every component source, so `@import("hg.zig")`
 /// (and `hg.audio`) resolve. Kept in the cache key. Add new SDK `.zig` files
 /// here.
-const sdk_modules = [_][]const u8{ "hg.zig", "hg_audio.zig", "hg_gl.zig", "hg_geometry.zig" };
+const sdk_modules = [_][]const u8{ "hg.zig", "hg_audio.zig", "hg_gl.zig", "hg_geometry.zig", "hg_clock.zig" };
 
 /// Arguments after the source path for every component compile, and folded
 /// into the cache key so a change recompiles. `-fstrip` drops debug info and the

@@ -1,5 +1,5 @@
 const std = @import("std");
-const clock = @import("clock.zig");
+const clock = @import("hg_clock.zig");
 const particles_sys = @import("rect.zig");
 
 pub const max_boids = 256;

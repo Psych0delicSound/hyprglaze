@@ -15,8 +15,9 @@
 //!     instead of owning a capture thread;
 //!   * window rects are read straight off the frame (frame pointers die at
 //!     `update`'s return; nothing is kept);
-//!   * the ray solver (`trace.zig`) and the f64 `clock.zig` are copied locally,
-//!     as the compiler stages every `.zig` in the directory.
+//!   * the ray solver (`trace.zig`) is copied locally (the compiler stages
+//!     every `.zig` in the directory); the f64 clock is the shared
+//!     `hg_clock.zig` staged by the loader.
 //!
 //! The palette colours (`iPalette`/`iPaletteBg`) are the host's standard
 //! uniforms; this module only pushes its own.
@@ -27,7 +28,7 @@ const hg = @import("hg.zig");
 
 const c = hg.c;
 
-const clock = @import("clock.zig");
+const clock = @import("hg_clock.zig");
 const trace = @import("trace.zig");
 
 pub const max_beams = 2;

@@ -14,5 +14,5 @@ test {
     _ = @import("core/window_anim.zig");
     _ = @import("effects/particles/system.zig");
     _ = @import("effects/laser/trace.zig");
-    _ = @import("effects/clock.zig");
+    _ = @import("hg_clock");
 }
