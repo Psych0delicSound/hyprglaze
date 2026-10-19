@@ -60,7 +60,7 @@ below.
   it never opens its own capture; set `wants_audio = 1` and read
   `hg_frame.wave` through `hg.audio.Analyzer`. `weft`, `crystal`, `swarm`
   (multi-file), `glitch`, `starfield`, `milkdrop`, `laser`, `particles` and
-  `acrylic` (multi-file, particle liquid) are the worked examples;
+  `acrylic` (GPU flow field + advected paint) are the worked examples;
   see `docs/effect-porting.md` for the per-effect port recipe.
 - `shaders/<name>.frag` — one frag per built-in, GLSL ES 3.0, Shadertoy-style
   uniforms. See the README's Shader Uniforms table for the exact list. At

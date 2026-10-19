@@ -28,7 +28,7 @@ A wallpaper daemon for Hyprland that renders GLSL shaders and modular effects on
 | `cellbloom` | Living Voronoi tissue around windows and cursor: rounded cells with glowing membranes that divide and fuse, lit by the music |
 | `concentric` | SDF concentric rings radiating from window edges, cursor interaction |
 | `fluid` | Metaball contour lines that merge organically around windows and cursor |
-| `acrylic` | A theme-black liquid pool simulated with particle physics: a dense, low-friction packing where black is the bulk of the fluid and palette-coloured parcels drift through it. Windows are floating leaves — dragging one shoves the pool and sends a wake rippling across the surface |
+| `acrylic` | A viscous theme-black liquid: a GPU flow field (off-screen vortices, ambient curl, vorticity and window drag) advects palette pigment through the surface, so windows stir narrow, sticky filaments and the dark paint keeps its deformed shape |
 | `starfield` | Flight through a 3D starfield: the cursor steers and the camera banks into turns, stars streak past with diffraction spikes on the bright ones, through a palette nebula that zooms by forever. Music pushes the speed, kicks surge it, and now and then it jumps to hyperspace |
 | `visualizer` | Stereo waveform with Catmull-Rom interpolation, amplitude-driven palette colors |
 | `milkdrop` | MilkDrop-style visualizer: eleven presets of per-frame motion equations (zoom, rotation, warp, ripple, kaleidoscope) over a half-float feedback loop, with scope/circle/spectrum/spiral waveforms, custom shapes, borders and video echo, blending into each other through patterned transitions. One preset draws your windows into the loop. Dreams on a synthetic wave when no music plays |
@@ -109,12 +109,17 @@ theme = "Rosé Pine"
 # back     = "#C4A7E7"  # in themes.json) or a hex string; omit either to roll it
 
 [acrylic]
-# count     = auto   # particles in the pool; default scales with the screen area
-# black     = 0.88   # fraction of the liquid that is theme black (0.5-1.0); the
-#                    # rest take palette accent slots
-# radius    = 0.028  # particle radius, fraction of the shorter screen side
-# viscosity = 0.40   # linear drag (1/s): higher is thicker, slower liquid
-# current   = 1.0    # strength of the slow ambient current that stirs the pool
+# scale     = 0.25   # velocity-field resolution, fraction of the output
+# dye_scale = 0.5    # paint resolution, fraction of the output
+# viscosity = 3.0    # flow decay (1/s): higher is thicker, slower liquid
+# momentum  = 0.15   # global drift strength; 0 leaves only windows and sources
+# ambient   = 0.04   # whole-surface curl-noise force
+# sources   = 3      # broad vortices just outside the screen (0 = off)
+# source    = 350    # strength of each off-screen vortex
+# force     = 5.0    # how strongly a moving window drags the flow
+# vorticity = 0.02   # shear-layer curl; keeps eddies alive
+# dye_decay = 0.12   # paint bleed rate (1/s)
+# seed      = 2.0    # pigment vein injection rate
 
 [fur]
 # spacing = 23.0      # follicle spacing in px; finer shimmers and reads as noise
