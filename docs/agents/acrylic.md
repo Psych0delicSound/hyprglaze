@@ -1,141 +1,222 @@
-# acrylic — design and next steps
+`acrylic` is a component effect (`effects/acrylic/`) that reproduces the
+Shadertoy **flow-ref3** ("kind of viscous, like honey", xenn) —
+<https://www.shadertoy.com/view/7sGGRD> — pass for pass. Three things are tuned
+for a desktop wallpaper: windows are solid rigid bodies in the flow, the colour
+input is the live theme quantised to a black-dominant OLED palette, and the
+dynamics run slower and more viscous than the reference. Read
+`docs/agents/layout.md` for where files live and `docs/effect-porting.md` /
+`docs/agents/new-effect.md` for the component recipe.
 
-`acrylic` is a component effect (`effects/acrylic/`) whose surface is a
-**simulated flow field shaping a procedural band pattern** rather than advected
-paint. This doc records the liquid model it targets, the current design, and the
-agreed next iteration. Read
-`docs/agents/layout.md` for where the files live and `docs/effect-porting.md`
-for the component recipe.
+## The reference
 
-## The liquid-surface model
+flow-ref3 is a five-pass mashup. Its JSON channel graph is the whole design:
 
-A convincing liquid surface is a dynamic map carrying two quantities at every
-point: **height** (which makes waves) and **velocity** (which makes flow).
-The few visually useful pieces are:
+| pass | body | inputs (in order) |
+|---|---|---|
+| Image | displacement + dispersion (fork of cornusammonis' *Displacement with Dispersion*) | `ch0`=Buffer D, `ch1`=colour, `ch2`=Buffer C |
+| Buffer A | *A fracturing dynamical system* (MsyXRW) | `ch0`=Buffer D, `ch1`=noise A, `ch3`=keyboard |
+| Buffer B | *A fluid-like dynamical system* (XddSRX) | `ch0`=Buffer A |
+| Buffer C | flockaroo's *single pass CFD* | `ch0`=Buffer C (self), `ch1`=noise C, `ch2`=colour, `ch3`=Buffer B |
+| Buffer D | *Barbarella's Lava Lamp* (sstGWl) feedback | `ch0`=Buffer B, `ch1`=colour, `ch2`=Buffer C, `ch3`=Buffer B |
 
-- **Flow inertia.** Water has mass, so when the force that drives it (wind, an
-  oar, a current) stops, the motion does not. Represent the flow as a velocity
-  field that persists and decays through viscosity (internal friction), e.g. an
-  exponential decay of the vector magnitude.
-- **Vorticity.** Velocity differences across the flow make it curl; where fast
-  water meets still water, eddies form and keep rotating after the main flow
-  has slowed. Seed these from the curl of the field.
-- **Object → liquid (waves).** A moving object displaces water ahead of it
-  (higher pressure) and leaves lower pressure behind, so the water flows back
-  in: a wake. A sudden, localized disturbance makes ripples that travel
-  outward, oscillate, and lose amplitude.
-- **Liquid → object (advection).** A floating object is passive: it is carried
-  at roughly the local flow velocity, rotates when its ends sit in different
-  velocities, and lags behind sharp turns because of surface drag and its own
-  mass.
+Shadertoy renders buffers in order A→B→C→D (Image last) and a buffer reading a
+buffer that has *not yet* run this frame sees the previous frame. So the actual
+per-frame dependency is:
 
-For **acrylic paint** specifically, the target is a stylized fluid-art look, not
-water: acrylic is thick and viscous (and non-Newtonian), so instead of splashes
-and circular ripples you get slow streams that flow *around* obstacles without
-fully mixing, leaving veins, cells and filaments.
+```
+A  <- D(prev),  noiseA, keyboard
+B  <- A
+C  <- C(prev),  noiseC, colour, B
+D  <- B,        colour, C,      B
+Img<- D,        colour, C
+```
 
-- **Color advection.** The paint moves in layers — a brushstroke deforms,
-  stretches and twists into long viscous trails rather than blending flat.
-- **Laminar flow around obstacles.** Streams bend smoothly around an object and
-  merge gradually behind it, with no turbulent, chaotic wake.
-- **Damped motion with "memory".** When the force ends, the paint slows as if
-  thickening in place, and the deformed patterns keep their shape.
-- **Flow interactions.** A stream pushing into another compresses and deforms
-  the boundary (color edges get denser); the interior of a stream moves faster
-  than its friction-slowed edges, so shear stretches rounded blobs into
-  teardrop- or almond-shaped filaments.
-- **Object on acrylic.** Like a heavy object on honey: it drags the nearby
-  layers into a trail, compressing the pattern ahead of it and stretching it
-  behind.
+The "collision" is the whole chain: the fracturing field (A) and the fluid field
+(B) feed each other through D, flockaroo's scale-mixing (C) advects them, and
+the lava lamp (D) wraps the result back into A next frame.
 
-The practical recipe is two pieces: a **procedural noise base** for the paint
-texture, and a **dynamic flow map** — a render texture that objects and motion
-write velocity vectors into, sampled by the shader to offset the paint UVs. In
-GL that persistent map needs ping-pong framebuffers (`hg_gl.Target`), not a
-single stateless fragment pass.
+## The port
 
-## Current design
+`effects/acrylic/effect.zig` keeps the four ping-pong pairs (`a`/`b`/`c`/`d`)
+and runs the passes in the order above, reproducing Shadertoy's
+previous-frame semantics exactly (A reads D's texture from last frame, C reads
+its own texture from last frame, etc.). `uRes0`/`uRes1` carry
+`iChannelResolution` for Buffer C's `randS`.
 
-The particle pool was retired: it detected window motion well but could not be
-turned into a convincing flow field. `acrylic` is now a GPU flow simulation.
+The GLSL is not re-authored:
 
-- **Flow field** — a ping-pong pair of `hg_gl.Target`s at `scale` (default
-  0.25 of the output). Each frame one pass:
-  1. semi-Lagrangian self-advection;
-  2. a few broad vortices **just outside the screen** (`sources`/`source`) at
-     different angles, alternating rotation and pushing inward, so streams
-     enter from different directions and meet;
-  3. a divergence-free **ambient curl-noise** force (`ambient`);
-  4. **vorticity confinement** (`vorticity`) to keep shear layers curling;
-  5. a second-order **momentum** spring-damper (`momentum`) chasing a slowly
-     rotating target, so the global drift overshoots and reverses;
-  6. exponential **viscosity** decay;
-  7. **windows as rigid bodies** (`force`/`push`): flow cannot pass through a
-     rect — the interior is bled to a stop and nudged gently out — while a soft
-     band just outside follows the frame, so the neighbouring paint stretches
-     with a moving window.
-- **Bands** — the native layer is **procedural bands in a carried coordinate**,
-  not advected paint. The display samples the bands at `uv + disp`, where `disp`
-  is a material displacement advected by the flow. Because the flow stretches
-  that coordinate, the band level sets become long sinuous filaments along the
-  stream, and — crucially — the pattern *keeps its form* as it travels instead
-  of being re-derived from the current direction every frame. **Black** is the
-  broad, low-contrast body; **blue** is a narrow vein system; **white** is a
-  rare thin core gated inside a blue vein.
-- **Displacement field** — a small second ping-pong pair at `warp_scale`
-  (default 0.75) carries `disp` (RG). Each frame it is advected by the flow and
-  bled back toward zero at `warp_relax` (default 0.15/s), so it stays anchored
-  and cannot drift or smear without bound. A window deforms `disp` locally and
-  the deformation lingers; elsewhere the band pattern is left alone.
-- **Windows** — rects come from `hg_frame`; the component tracks previous rects
-  to derive each window's velocity. There is no CPU simulation and no
-  `system.zig`.
-- **Verification** — `scripts/acrylic.probe.sh` (mostly black, palette colour
-  present, a moved window leaves a wake larger than the ambient drift). The
-  flow is a GPU pass, so `zig build` cannot catch shader errors: always cold-
-  load the component and read `/tmp/hyprglaze.log`.
+- `effects/acrylic/acrylic.frag` — the Image pass; the host loads and
+  compiles it as the display shader.
+- `effects/acrylic/shaders.zig` — Buffers A–D, generated from the original
+  `.frag` files. The Common tab is prepended to each.
 
-The reference pieces in `shaders/customs/` (`flow-ref.frag`, `flow-ref2.frag`,
-`flow-ref2-buffer-d.frag`, and the full `flow-ref3*.frag` pass set) are
-Shadertoy passes. We took their ideas (stored velocity, curl, vorticity
-confinement, multiscale potential, and displacement/dispersion along the field)
-rather than their exact code; `flow-ref3` is the elongation/mixing reference the
-band shaping is measured against.
+The regeneration script is `scripts/gen-acrylic-shaders.py` (it reads the
+reference `.frag` files and rewrites `shaders.zig` + `acrylic.frag`). It makes
+these edits, all documented in its header:
 
-### Known gaps
+- Shadertoy plumbing: `iChannelN` → `uChN`, `iChannelResolution[0|1]` →
+  `uRes0|uRes1`, and a `main()` wrapper that calls the untouched `mainImage()`.
+- Window rigid bodies: an obstacle snippet appended to Buffers A, B and C and
+  applied to the field in the `main()` wrapper (see *Windows* below).
+- A theme colour source in the Image pass, replacing the reference's colour
+  texture `iChannel1` (see *Colours* below). The displacement and dispersion
+  maths is untouched.
+- Slow/viscous constants in Buffers A/B/C (see *Tuning* below); the equations
+  are untouched.
 
-- A window is a box rigid body: flow stops at its edges and is pushed out, but
-  it does not yet *deflect* smoothly around the corners, and the boundary drag
-  is a uniform band rather than a real no-slip layer.
-- The band pattern is now stable frame to frame (a moved window no longer
-  reshuffles distant flows), but the carried coordinate is low frequency, so
-  the surface currently reads as a few large ribbons rather than many fine
-  veins.
+### Inputs
 
-## Next iteration plan
+The reference's external textures are not shipped. The port synthesises them
+deterministically at first upload:
 
-### 1. Laminar flow around windows
+- `noise_a` — smooth multi-octave value noise (coherent blobs; Buffer A seeds
+  from it).
+- `noise_c` — white noise (Buffer C steps a random rotation each frame).
+- keyboard — a 1×1 zero, so Buffer A's `reset()` never fires, the same as an
+  untouched wallpaper.
 
-- Round the obstacle boundary and add a little vorticity at the shear edges so
-  the wake merges rather than forming rings; compress ahead of the leading edge
-  and stretch behind.
-- A true no-slip layer instead of a uniform drag band.
+This changes no movement logic: both noise inputs are 256×256 and drive exactly
+the same code paths as the reference images.
 
-### 2. Acrylic tuning
+### Colours
 
-- Keep tuning the band ratios and the flow against **Black Blue OLED**; black
-  must stay the bulk even when a window mixes hard. Current steady state settles
-  near 12% coloured and ~88% near-black.
-- White is a rare vein core; its amount is provisional and will be fine-tuned.
-- More, finer veins: raise the carried-coordinate frequency / add folds without
-  reintroducing the global reshuffle.
+The reference's colour JPEG (`iChannel1`) is replaced by `hgTheme(uv)`, a thin
+contour field: `hgField` is a sum of sines — a horizontal family plus a rotated
+one, so the vein network runs into the vertical edges too — and `hgPaint` keeps
+only the narrow top of `0.5 + 0.5*sin(field)`, so the source is mostly zero
+with long veins. Near the screen borders the vein band is widened (an
+`edge`-weighted `smoothstep` lower bound), so more coloured flows enter from
+every edge and drift inward. The Image pass's dispersion then averages that
+source along the displacement, and the surviving intensity `p` is mapped onto
+four theme slots:
 
-### Acceptance
+| band | source | target area |
+|---|---|---|
+| black | `iPaletteBg` | ~82% |
+| deep blue | `iPalette[10]` (`#1240b0` on Black Blue OLED) | ~9% |
+| light blue | `iPalette[2]` (`#2e8fff`) | ~4.5% |
+| white | `iPalette[15]` | ~4.5% |
 
-- `scripts/acrylic.probe.sh` passes: black dominant, palette colour present,
-  and a moved window leaves a wake larger than the ambient drift.
-- A still frame reads as thick, layered acrylic; dragging a window drags,
-  compresses and folds it, and the pattern keeps deforming for a moment after
-  the window stops.
-- Update this doc, `README.md` (effect row + `[acrylic]` config) and the probe
-  in the same commit as the code.
+`hgPalette(p)` uses `smoothstep` thresholds at roughly the 80th, 88th and 94th
+percentiles of the dispersed intensity (`0.20`, `0.42`, `0.66`), so the screen
+reads as a broad OLED-black body with blue veins and white cores. The
+thresholds are tuned for the palette above; they are the knobs to move if a
+theme's luminance changes the balance.
+
+Two finishing touches are borrowed from `weft`: an additive field grain over the
+whole screen (10 Hz reseed, amplitude `0.035`, so the black body has a little
+stock), and a weak dark-light halo around windows — flows lift near a window
+(`mix(0.78, 1.14, halo)`) and the far field rests darker. Both are much weaker
+than weft's full fringe halo. The reference's
+contrast/ACES/lava-glow finish is dropped: it flooded the screen with colour and
+fought the theme. The colour texture's only other use in the reference (Buffers
+C/D) is discarded by the original code, so those passes bind a 1×1 placeholder.
+
+The palette uniforms (`iPalette`, `iPaletteSize`, `iPaletteBg`, `iPaletteFg`)
+are supplied by the host for the display shader.
+
+### Windows
+
+flow-ref3 has no window interaction. This port adds one, additively: every
+window is a **rigid body** in the flow.
+
+`hgObstacle()` (generated into the GLSL) is applied to Buffer A's `.xy` and
+`.zw`, Buffer B's velocity `.xy`, and Buffer C's `.xy`. For each window it
+builds a rounded-box SDF and only acts within a thin band at the surface and in
+the interior — never globally (the far-field gate is what stops the normal
+reaching across the screen and pulling flows in like a magnet):
+
+- **no penetration** — the base is the magnet-fix projection: the inward normal
+  component of the field is removed, so flow bends around the window instead of
+  crossing it. The test is relative to the window's own velocity, so a window
+  moving into the flow pushes it aside;
+- **interior clearing** (`win_push`) — inside the rect the whole field is
+  damped from the edge inward (default fully), so there is **no flow under a
+  window** and no window-shaped imprint leaks out as a trail when it moves.
+  Nothing is frozen into a solid; the field simply relaxes to zero under the
+  body and the boundary layer keeps the transition smooth;
+- **edge-parallel redirect** (`win_turn`) — the inflow removed at the surface is
+  added back along the edge tangent, so a stream heading into the window turns
+  and slides alongside it instead of piling up;
+- **swirl** (`win_curl`) — a swirl term rolls a head-on stream around the body;
+- **bounds push** (`win_wall`) — the window's own motion is projected on the
+  outward normal, so the leading edge shoves flow ahead of it relative to the
+  window bounds;
+- **inertia** — the window velocity is exponentially smoothed with a ~0.15 s
+  time constant before it reaches the shader, so the push ramps in and fades
+  out instead of snapping;
+- **optional no-slip** (`win_slip`) — viscous drag at the surface; default free
+  slip, push-and-deflect only.
+
+The obstacle only adds or removes components; it never reconstructs a magnitude
+from the field, so no constant offset can creep into a buffer (an earlier
+version blended toward the outward normal and, because Buffer C used to be
+treated 0.5-centred, left a ~0.5 displacement bias under windows — the "flow
+under the window" residue).
+
+Window rects and per-window velocities are tracked in `update()` from
+`hg_frame.windows` (velocities from the centre delta; the host only supplies the
+focused window's velocity). Rect coordinates are GL-space surface pixels, so
+they are scaled by `scale` into buffer pixels before upload.
+
+### Tuning
+
+The reference runs at 60 Hz with full-strength advection, which reads as fast
+churn on a desktop. The generator rewrites a few constants (the equations are
+untouched):
+
+| pass | constant | reference | port | effect |
+|---|---|---|---|---|
+| A | `TIMESTEP` | `0.1` | `0.007` | slower acceleration |
+| A | `ADVECT_DIST` | `2.0` | `0.3` | shorter transport, stickier field |
+| B | `ad` | `6.0` | `0.45` | shorter fluid advection |
+| B | `upd` | `0.99` | `0.9997` | more inertia, slower response |
+| C | self-advection `*2.0` | `2.0` | `0.12` | slower scale-mixing |
+| D | time uniform | `iTime` | `iTime * 0.10` | slower lava-lamp blend |
+
+Measured on the wallpaper strips, the vein mask changes ~7% in 0.5 s and ~23% in
+2 s. Increasing the constants speeds the honey up; decreasing them risks a
+static field. These are compile-time replacements, so regenerate after editing
+the script.
+
+## Config
+
+`[acrylic]` in the TOML (see the README):
+
+- `scale` — buffer resolution as a fraction of the output. Default `0.8`:
+  four-fifths resolution makes every texel cover 1.25 output pixels, so the
+  structures read a little larger and the four buffers are ~1.56× cheaper.
+  `1.0` is the reference's canvas-resolution behaviour.
+- `win_band` — boundary-layer thickness in surface px (default `10`).
+- `win_corner` — rounded-corner radius of the obstacle in surface px
+  (default `14`).
+- `win_speed` — the window speed in px/s that maps to a field value of `1`
+  (default `700`); body velocity is clamped to a unit vector in field space.
+- `win_slip` — `0..1`, optional no-slip drag at the window surface (default
+  `0.0`, free slip: windows push and deflect the flow but never pull it).
+- `win_push` — `0..1`, how hard the flow under a window is cleared
+  (default `1.0`, no flow at all under the body). Lower it for a little
+  residual movement under a window.
+- `win_turn` — `0..1`, how much incoming flow is bent into an edge-parallel
+  slide (default `0.85`). `0` stops flow dead at the edge.
+- `win_curl` — `0..1`, swirl added to that slide so head-on flow rolls around
+  the body (default `0.25`).
+- `win_wall` — `0..1`, push ahead of a moving window's bounds (default `0.6`);
+  the velocity is inertia-smoothed (~0.15 s) before it reaches the shader.
+
+## Verify
+
+```sh
+zig build && zig build test
+scripts/rebuild.sh
+~/.local/bin/hyprglaze --list-effects        # acrylic listed
+~/.local/bin/hyprglaze --effect acrylic --fps   # cold-load, watch /tmp/hyprglaze.log
+```
+
+The five passes are GPU shaders compiled at load, so `zig build` cannot catch a
+shader error — always cold-load and read the log. A uniform typo renders flat and
+still "succeeds".
+
+At 1920×1200 with `scale = 0.8` the four buffers plus the Image pass run at
+~60 FPS on the reference machine.
+

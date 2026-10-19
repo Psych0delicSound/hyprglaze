@@ -1,0 +1,1 @@
+remove every buddy mentions from code, from any doc even that says "dont reintroduce buddy"

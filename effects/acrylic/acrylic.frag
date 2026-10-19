@@ -1,119 +1,384 @@
 #version 300 es
 precision highp float;
-
-// acrylic — Balatro-style paint bands carried by the component's GPU flow field.
-//
-// The native layer is procedural but sampled in a coordinate the flow carries
-// (`uv + disp`), so the bands travel and stretch with the stream and keep their
-// form instead of being re-derived each frame. The black body is broad and low
-// contrast, blue veins are narrow bands, and white is a rare thin core inside a
-// blue vein.
-
 uniform vec3 iResolution;
 uniform float iTime;
-
-uniform sampler2D iAcrFlowTex;   // RG velocity in px/s
-uniform sampler2D iAcrDyeTex;    // advected material displacement in RG
-uniform float iAcrActive;
-uniform float iAcrFlowScale;
-
+uniform int iFrame;
+uniform vec4 iMouse;
+uniform sampler2D uCh0;
+uniform sampler2D uCh1;
+uniform sampler2D uCh2;
+uniform sampler2D uCh3;
+uniform vec3 uRes0;
+uniform vec3 uRes1;
 uniform vec3 iPalette[16];
 uniform int iPaletteSize;
 uniform vec3 iPaletteBg;
 uniform vec3 iPaletteFg;
 
-out vec4 fragColor;
 
-float hash21(vec2 p) {
-    p = fract(p * vec2(234.34, 435.345));
-    p += dot(p, p + 34.23);
-    return fract(p.x * p.y);
+#define pi acos(-1.)
+
+#define Margins .0
+
+#define sint(a) (asin(sin(a))*2. - 1.)
+
+#define rot(a) mat2(cos(a),-sin(a),sin(a),cos(a))
+
+#define pmod(p,d) mod(p - (d)*0.5, (d)) - 0.5*(d)
+
+float r11(float i){ return fract(sin(i*12.126)*12.6);}
+
+//#define xor(a,b,c) min(max((a),-(b)), max((b),-(a) - c)) 
+
+float ss( float c, float power, float bias){
+    c = clamp(c,-0.,1.);
+    //c = smoothstep(0.,1.,c);
+    
+    c = pow(c,1. + bias);
+    
+    float a = pow( abs(c), power);
+    float b = 1.-pow( abs(c - 1.), power);
+    
+    return mix(a,b,c);
 }
-float vnoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    float a = hash21(i);
-    float b = hash21(i + vec2(1.0, 0.0));
-    float c = hash21(i + vec2(0.0, 1.0));
-    float d = hash21(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+float valueNoise(float i, float p){ return mix(r11(floor(i)),r11(floor(i) + 1.), ss(fract(i), p,0.6));}
+
+float valueNoiseStepped(float i, float p, float steps){ return mix(  floor(r11(floor(i))*steps)/steps, floor(r11(floor(i) + 1.)*steps)/steps, ss(fract(i), p,0.6));}
+
+
+// See: https://www.shadertoy.com/view/ls2Bz1
+// Spectral Colour Schemes
+// By Alan Zucconi
+// Website: www.alanzucconi.com
+// Twitter: @AlanZucconi
+
+// Example of different spectral colour schemes
+// to convert visible wavelengths of light (400-700 nm) to RGB colours.
+
+// The function "spectral_zucconi6" provides the best approximation
+// without including any branching.
+// Its faster version, "spectral_zucconi", is advised for mobile applications.
+
+
+// Read "Improving the Rainbow" for more information
+// http://www.alanzucconi.com/?p=6703
+
+
+
+float saturate (float x)
+{
+    return min(1.0, max(0.0,x));
 }
-float fbm(vec2 p) {
-    float v = 0.0;
-    float a = 0.5;
-    for (int i = 0; i < 4; i++) {
-        v += a * vnoise(p);
-        p = mat2(1.6, 1.2, -1.2, 1.6) * p;
-        a *= 0.55;
+vec3 saturate (vec3 x)
+{
+    return min(vec3(1.,1.,1.), max(vec3(0.,0.,0.),x));
+}
+
+// --- Spectral Zucconi --------------------------------------------
+// By Alan Zucconi
+// Based on GPU Gems: https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch08.html
+// But with values optimised to match as close as possible the visible spectrum
+// Fits this: https://commons.wikimedia.org/wiki/File:Linear_visible_spectrum.svg
+// With weighter MSE (RGB weights: 0.3, 0.59, 0.11)
+vec3 bump3y (vec3 x, vec3 yoffset)
+{
+    vec3 y = vec3(1.,1.,1.) - x * x;
+    y = saturate(y-yoffset);
+    return y;
+}
+
+// --- Spectral Zucconi 6 --------------------------------------------
+
+// Based on GPU Gems
+// Optimised by Alan Zucconi
+vec3 spectral_zucconi6 (float x)
+{
+    // w: [400, 700]
+    // x: [0,   1]
+
+    const vec3 c1 = vec3(3.54585104, 2.93225262, 2.41593945);
+    const vec3 x1 = vec3(0.69549072, 0.49228336, 0.27699880);
+    const vec3 y1 = vec3(0.02312639, 0.15225084, 0.52607955);
+
+    const vec3 c2 = vec3(3.90307140, 3.21182957, 3.96587128);
+    const vec3 x2 = vec3(0.11748627, 0.86755042, 0.66077860);
+    const vec3 y2 = vec3(0.84897130, 0.88445281, 0.73949448);
+
+    return
+        bump3y(c1 * (x - x1), y1) +
+        bump3y(c2 * (x - x2), y2) ;
+}
+
+// --- MATLAB Jet Colour Scheme ----------------------------------------
+vec3 spectral_jet(float w)
+{
+    // w: [400, 700]
+    // x: [0,   1]
+    float x = saturate((w - 400.0)/ 300.0);
+    vec3 c;
+
+    if (x < 0.25)
+        c = vec3(0.0, 4.0 * x, 1.0);
+    else if (x < 0.5)
+        c = vec3(0.0, 1.0, 1.0 + 4.0 * (0.25 - x));
+    else if (x < 0.75)
+        c = vec3(4.0 * (x - 0.5), 1.0, 0.0);
+    else
+        c = vec3(1.0, 1.0 + 4.0 * (0.75 - x), 0.0);
+
+    // Clamp colour components in [0,1]
+    return saturate(c);
+}
+
+
+// ---- theme paint source (replaces the reference colour texture) ----------
+// Display-only inputs (the host sets these for the Image/display shader).
+uniform vec4 iWindows[32];
+uniform int iWindowCount;
+uniform float iTransition;
+uniform int iFocusedIndex;
+uniform int iPrevIndex;
+
+float hgField(vec2 uv) {
+    vec2 p = (uv - 0.5) * vec2(iResolution.x / max(iResolution.y, 1.0), 1.0);
+    vec2 q = p * 4.2;
+    float f = q.y
+        + 0.85 * sin(q.x * 0.30)
+        + 0.45 * sin(q.x * 0.75 - q.y * 0.35)
+        + 0.22 * sin(q.x * 1.60 + q.y * 0.80)
+        + 0.10 * sin(q.x * 3.10 - q.y * 1.30);
+    // A rotated family, so the vein network also runs into the vertical
+    // edges instead of only travelling sideways.
+    float g = q.x * 0.85
+        + 0.80 * sin(q.y * 0.28 + 1.2)
+        + 0.40 * sin(q.y * 0.70 - q.x * 0.45);
+    return f + 0.9 * sin(g);
+}
+
+float hgPaint(vec2 uv) {
+    float s = 0.5 + 0.5 * sin(hgField(uv));
+    // Wider veins near the borders, so more coloured flows enter from the
+    // edges of the screen and drift inward.
+    vec2 m = min(uv, 1.0 - uv);
+    float edge = 1.0 - smoothstep(0.0, 0.34, min(m.x, m.y));
+    return smoothstep(0.980 - 0.05 * edge, 0.999, s);
+}
+
+vec3 hgTheme(vec2 uv) { return vec3(hgPaint(uv)); }
+
+// Rounded-box SDF for the window light (same shape as the flow obstacle).
+float hgWinSd(vec2 p, vec4 w, float r) {
+    vec2 c = w.xy + w.zw * 0.5;
+    vec2 h = max(w.zw * 0.5 - vec2(r), vec2(0.0));
+    vec2 q = abs(p - c) - h;
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+// Dark-light logic borrowed from weft, but much weaker: flows lift near a
+// window and the far field rests a little darker. It only scales colour, so
+// the black body stays black.
+vec3 hgWindowLight(vec3 col, vec2 px) {
+    float halo = 0.0;
+    for (int i = 0; i < iWindowCount && i < 32; i++) {
+        vec4 w = iWindows[i];
+        if (w.z < 1.0 || w.w < 1.0) continue;
+        float d = hgWinSd(px, w, 12.0);
+        float focus = 0.0;
+        if (i == iFocusedIndex) focus = smoothstep(0.0, 1.0, iTransition);
+        if (i == iPrevIndex) focus = max(focus, 1.0 - smoothstep(0.0, 1.0, iTransition));
+        halo += exp(-max(d, 0.0) / (90.0 + 50.0 * focus)) * (0.6 + 0.4 * focus);
     }
-    return v;
+    halo = clamp(halo, 0.0, 1.0);
+    return col * mix(0.78, 1.14, halo);
 }
 
-void main() {
-    vec2 uv = gl_FragCoord.xy / iResolution.xy;
-    vec3 black = iPaletteSize > 0 ? iPaletteBg : vec3(0.012, 0.013, 0.015);
+// weft's field grain, additive so it survives on a black surface.
+float hgGrain(vec2 cell, float seed) {
+    uvec3 v = uvec3(uvec2(ivec2(cell) + 8192), uint(seed));
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z;
+    return float(v.x & 0x00ffffffu) / 16777216.0;
+}
 
-    if (iAcrActive < 0.5) {
-        fragColor = vec4(black, 1.0);
+// Black body, deep-blue veins, rarer light-blue veins, rare white cores.
+vec3 hgPalette(float p) {
+    vec3 black = iPaletteBg;
+    vec3 deep  = (iPaletteSize > 10) ? iPalette[10] : vec3(0.07, 0.25, 0.68);
+    vec3 light = (iPaletteSize > 2)  ? iPalette[2]  : vec3(0.18, 0.56, 1.00);
+    vec3 white = (iPaletteSize > 15) ? iPalette[15] : vec3(1.0);
+    vec3 c = black;
+    c = mix(c, deep,  smoothstep(0.200, 0.240, p));
+    c = mix(c, light, smoothstep(0.420, 0.470, p));
+    c = mix(c, white, smoothstep(0.660, 0.710, p));
+    return c;
+}
+
+
+// Mashup Fork of "Displacement with Dispersion" by cornusammonis. https://shadertoy.com/view/4ldGDB
+// 2021-08-28 10:34:29
+// & this https://www.shadertoy.com/view/MsGSRd by flockeroo
+
+// displacement amount
+#define DISP_SCALE 1.50
+
+// chromatic dispersion samples
+#define SAMPLES 64
+
+// contrast
+#define SIGMOID_CONTRAST 12.0
+
+// channels to use for displacement, either xy or zw
+#define CH xy
+
+
+vec3 contrast(vec3 x) {
+    return 1.0 / (1.0 + exp(-SIGMOID_CONTRAST * (x - 0.5)));    
+}
+
+vec2 normz(vec2 x) {
+    return x == vec2(0) ? vec2(0) : normalize(x);
+}
+
+/*
+    This function supplies a weight vector for each color channel.
+    It's analogous to (but not a physically accurate model of)
+    the response curves for each of the 3 cone types in the human eye.
+    The three functions for red, green, and blue have the same integral
+    over [0, 1], which is 1/3.
+    Here are some other potential terms for the green weight that 
+    integrate to 1/3:
+        2.0*(1-x)*x
+        10.0*((1-x)*x)^2
+        46.667*((1-i)*i)^3
+        210.0*((1-x)*x)^4
+        924.0*((1-x)*x)^5
+    By the way, this series of coefficients is OEIS A004731 divided by 3,
+    which is a pretty interesting series: https://oeis.org/A002457
+*/
+vec3 sampleWeights(float i) {
+    return vec3(i * i, 46.6666*pow((1.0-i)*i,3.0), (1.0 - i) * (1.0 - i));
+}
+
+vec3 sampleDisp(vec2 uv, vec2 dispNorm, float disp) {
+    vec3 col = vec3(0);
+    const float SD = 1.0 / float(SAMPLES);
+    float wl = 0.0;
+    vec3 denom = vec3(0);
+    for(int i = 0; i < SAMPLES; i++) {
+        vec3 sw = sampleWeights(wl);
+        denom += sw;
+        col += sw * hgTheme(uv + dispNorm * disp * wl);
+        wl  += SD;
+    }
+    
+    // For a large enough number of samples,
+    // the return below is equivalent to 3.0 * col * SD;
+    return col / denom;
+}
+
+// Fork of "Barbarella's Lava Lamp 3" by xenn. https://shadertoy.com/view/sstGWl
+// 2021-09-06 05:11:27
+
+//Chromatic aberration, film grain and tone mapping
+
+float NoiseSeed;
+
+float randomFloat(){
+  NoiseSeed = sin(NoiseSeed) * 84522.13219145687;
+  return fract(NoiseSeed);
+}
+
+vec3 ACESFilm(vec3 x)
+{
+    float a = .51;
+    float b = 0.03;
+    float c = 3.43;
+    float d = 0.59;
+    float e = 03.14;
+    return (x*(a*x+b))/(x*(c*x+d)+e);
+}
+
+
+
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord ){
+    vec2 texel = 1. / iResolution.xy;
+    vec2 uv = fragCoord.xy / iResolution.xy;
+
+    vec2 n  = vec2(0.0, texel.y);
+    vec2 e  = vec2(texel.x, 0.0);
+    vec2 s  = vec2(0.0, -texel.y);
+    vec2 w  = vec2(-texel.x, 0.0);
+
+    vec2 dd   = texture(uCh0, uv).CH;
+    vec2 d_n = texture(uCh0, fract(uv+n)).CH;
+    vec2 d_e = texture(uCh0, fract(uv+e)).CH;
+    vec2 d_s = texture(uCh0, fract(uv+s)).CH;
+    vec2 d_w = texture(uCh0, fract(uv+w)).CH; 
+
+    // antialias our vector field by blurring
+    vec2 db = 0.4 * dd + 0.15 * (d_n+d_e+d_s+d_w);
+
+    float ld = length(db);
+    vec2 ln = normz(db);
+
+    vec3 col = sampleDisp(uv, ln, DISP_SCALE * ld);
+    
+//    fragColor = vec4(contrast(col), 1.0);
+
+//}
+
+//void mainImage( out vec4 fragColor, in vec2 fragCoord ) {
+    
+    if(fragCoord.y / iResolution.y < Margins || fragCoord.y / iResolution.y > 1.0-Margins){
+        fragColor = vec4(ACESFilm(vec3(0)), 1.0);
         return;
     }
+    
+    NoiseSeed = float(iFrame)* .003186154 + fragCoord.y * 17.2986546543 + fragCoord.x;
+    
+//    vec2 uv = fragCoord.xy/iResolution.xy;
+    
+    vec2 d = (uv-vec2(.5)) * .0075;
+    vec3 color = vec3(texture(uCh0, uv - -.0 * d).r,
+                      texture(uCh0, uv - .0 * d).g,
+                      texture(uCh0, uv - -.0 * d).b);
+                                  
+    vec3 colz = hgTheme(uv);
+                      
+        vec3 col2 = vec3(texture(uCh2, uv - 0.0 * d).r,
+                      texture(uCh2, uv - .0 * d).g,
+                      texture(uCh2, uv - -.0 * d).b);
+                      
+                      colz = max(colz,col2);
+                  //    color = max(col2,col);
+                      col2 = mix(col2,color,0.5);
+                     col2 = max(colz,color);
+                      
+                       
+    //  color = min(col,color);
+    float noise = .9 + randomFloat()*.15;
+//      fragColor = vec4(ACESFilm(((color * 0.5)+ (min(col,color)))*noise), 1.0);
+    
+     colz = hgPalette((col.r + col.g + col.b) / 3.0);
+     colz = hgWindowLight(colz, gl_FragCoord.xy);
+     colz += (hgGrain(floor(gl_FragCoord.xy / 2.0), floor(iTime * 10.0)) - 0.5) * 0.035;
+     fragColor=vec4(colz,1.0);
+}
 
-    vec3 blue = iPaletteSize > 2 ? iPalette[2] : vec3(0.18, 0.56, 1.0);
-    vec3 deep = iPaletteSize > 11 ? iPalette[11] : vec3(0.07, 0.25, 0.68);
-    vec3 white = iPaletteSize > 15 ? iPalette[15] : vec3(1.0);
 
-    // The flow carries a material coordinate: the bands are sampled at
-    // (uv + disp), so the pattern travels and stretches with the stream instead
-    // of being re-derived from the current direction every frame. A window
-    // displaces `disp` locally and the deformation lingers; elsewhere the
-    // pattern keeps its form.
-    vec2 vel = texture(iAcrFlowTex, uv).xy;
-    float speed = length(vel);
-    vec2 disp = texture(iAcrDyeTex, uv).rg;
-    vec2 pc = (uv + disp - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);
-    vec2 q = pc * 9.0;
-    float t = iTime;
 
-    // Long sinuous contours of the carried coordinate. The flow stretches that
-    // coordinate, so its level sets become filaments along the stream; the
-    // extra folds keep the veins from collapsing into a few flat strokes.
-    float f = q.y
-            + 0.85 * sin(q.x * 0.30)
-            + 0.45 * sin(q.x * 0.75 - q.y * 0.35)
-            + 0.22 * sin(q.x * 1.60 + q.y * 0.80)
-            + 0.10 * sin(q.x * 3.10 - q.y * 1.30);
 
-    // A fixed function of the carried coordinate, so the grain of the paint
-    // moves with it rather than flickering in place.
-    float n = fbm(q * 0.55);
 
-    // Black body: broad bands, a low-contrast dark sheen rather than a field.
-    float bblack = 0.5 + 0.5 * sin(f * 1.00 + 0.6 + n * 0.8);
-    float black_cov = smoothstep(0.20, 0.80, bblack);
-    vec3 black_liq = mix(black, deep, 0.08 + 0.13 * black_cov);
 
-    // Blue veins: narrow bands, the second liquid.
-    float bblue = 0.5 + 0.5 * sin(f * 2.80 + 1.9 + n * 0.9);
-    float blue_cov = smoothstep(0.92, 0.995, bblue);
 
-    // White: rare thin cores that only exist inside a blue vein.
-    float bwhite = 0.5 + 0.5 * sin(f * 5.50 + 3.4 + n * 1.2);
-    float white_cov = smoothstep(0.970, 0.9996, bwhite) * smoothstep(0.45, 0.95, blue_cov);
 
-    vec3 col = black;
-    col = mix(col, black_liq, 0.92);
 
-    vec3 blue_mix = mix(deep, blue, smoothstep(0.30, 0.95, blue_cov));
-    col = mix(col, blue_mix, blue_cov * 0.92);
-    col = mix(col, white, white_cov * 0.72);
-
-    // A faint wet sheen on the moving paint.
-    float sp = clamp(speed / max(iAcrFlowScale, 1.0), 0.0, 1.0);
-    col += mix(black, white, 0.05) * sp * (0.30 + 0.55 * blue_cov);
-
-    // Whisper of grain so the black never bands.
-    col += (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233)) + t) * 43758.5453) - 0.5) * 0.014;
-
-    fragColor = vec4(col, 1.0);
+out vec4 hg_fragColor;
+void main() {
+    mainImage(hg_fragColor, gl_FragCoord.xy);
 }
