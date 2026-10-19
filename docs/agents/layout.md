@@ -59,8 +59,10 @@ below.
   `/usr/share/hyprglaze/effects/`. A component takes audio from the host —
   it never opens its own capture; set `wants_audio = 1` and read
   `hg_frame.wave` through `hg.audio.Analyzer`. `weft`, `crystal`, `swarm`
-  (multi-file), `glitch`, `starfield`, `milkdrop`, `laser`, `particles` and
-  `acrylic` (GPU flow field + flow-shaped bands) are the worked examples;
+  (multi-file), `glitch`, `starfield`, `milkdrop`, `laser`, `particles`,
+  `acrylic` (GPU flow field + flow-shaped bands) and `acrylic2` (a 1:1 port
+  of the `flow-ref3` Shadertoy: five chained buffers, window rigid bodies,
+  theme-coloured) are the worked examples;
   see `docs/effect-porting.md` for the per-effect port recipe.
 - `shaders/<name>.frag` — one frag per built-in, GLSL ES 3.0, Shadertoy-style
   uniforms. See the README's Shader Uniforms table for the exact list. At

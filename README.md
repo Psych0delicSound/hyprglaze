@@ -29,6 +29,7 @@ A wallpaper daemon for Hyprland that renders GLSL shaders and modular effects on
 | `concentric` | SDF concentric rings radiating from window edges, cursor interaction |
 | `fluid` | Metaball contour lines that merge organically around windows and cursor |
 | `acrylic` | A viscous theme-black liquid: a GPU flow field (directional off-screen vortices, ambient curl, vorticity and window drag) carries a procedural band coordinate so the paint travels and stretches with the stream — a broad black body, narrow blue veins, rare white cores — while each window is a rigid body that blocks flow through it, pushes it gently out, and drags the neighbouring paint along |
+| `acrylic2` | A faithful 1:1 port of the `flow-ref3` Shadertoy ("kind of viscous, like honey"): five chained passes — two dynamical systems (a fracturing field and a fluid-like field), flockaroo's rotational single-pass CFD, and a lava-lamp feedback — feeding a displacement-with-dispersion image pass. Windows are solid rigid bodies the flow bends around, and the honey takes its colours from the live theme |
 | `starfield` | Flight through a 3D starfield: the cursor steers and the camera banks into turns, stars streak past with diffraction spikes on the bright ones, through a palette nebula that zooms by forever. Music pushes the speed, kicks surge it, and now and then it jumps to hyperspace |
 | `visualizer` | Stereo waveform with Catmull-Rom interpolation, amplitude-driven palette colors |
 | `milkdrop` | MilkDrop-style visualizer: eleven presets of per-frame motion equations (zoom, rotation, warp, ripple, kaleidoscope) over a half-float feedback loop, with scope/circle/spectrum/spiral waveforms, custom shapes, borders and video echo, blending into each other through patterned transitions. One preset draws your windows into the loop. Dreams on a synthetic wave when no music plays |
@@ -76,9 +77,9 @@ sudo zig build -Doptimize=ReleaseSafe --prefix /usr
 
 ```toml
 # Effects: particles, windowglow, cellbloom, concentric, fluid, acrylic,
-#          starfield, visualizer, milkdrop, glitch, buddy, tide, fire, swarm,
-#          voltaic, moire, ivy, whorl, weft, crystal, fur, amorphous, laser,
-#          flux
+#          acrylic2, starfield, visualizer, milkdrop, glitch, buddy, tide,
+#          fire, swarm, voltaic, moire, ivy, whorl, weft, crystal, fur,
+#          amorphous, laser, flux
 effect = "fluid"
 theme = "Rosé Pine"
 # output = "DP-1"     # monitor to render on; default is the focused one
@@ -120,6 +121,16 @@ theme = "Rosé Pine"
 # push        = 600   # how hard a window ejects flow from its interior (px/s²)
 # vorticity   = 0.02  # shear-layer curl; keeps eddies alive
 # warp_relax  = 0.15  # how fast the carried band coordinate re-anchors (1/s)
+
+[acrylic2]
+# scale      = 0.5   # buffer resolution, fraction of the output. Shadertoy ran
+#                    # every buffer at canvas size (1.0); 0.5 renders at half
+#                    # resolution, so the honey's structures read about twice as
+#                    # large (0.1-1.0)
+# win_band   = 10    # window boundary-layer thickness, px
+# win_corner = 14    # corner radius of the window obstacle, px
+# win_speed  = 700   # window speed (px/s) that maps to a field value of 1
+# win_slip   = 0.85  # 0..1: how hard a window drags the flow at its surface
 
 [fur]
 # spacing = 23.0      # follicle spacing in px; finer shimmers and reads as noise
