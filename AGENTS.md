@@ -18,6 +18,7 @@ read **only** the doc(s) your task touches, to keep context small.
 | `docs/agents/config.md` | config dir and shader/effect resolution (do not break) |
 | `docs/agents/harness.md` | running the nested Hyprland harness / probes |
 | `docs/agents/history.md` | before touching anything removed or forbidden |
+| `docs/agents/new-effect.md` | adding a new effect, especially one needing a new host input/context |
 | `docs/effect-porting.md` | porting a built-in effect to a C-ABI component |
 
 ## Keeping these docs current (before every commit)
