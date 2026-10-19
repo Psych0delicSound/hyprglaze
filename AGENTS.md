@@ -39,6 +39,9 @@ terminal `hyprglaze` stale; never stop at that. Details and debugging are in
 
 ## Universal rules
 
+- **Do not commit without the user's explicit approval.** Make edits and run
+  the loop, but leave the working tree uncommitted until the user asks you to
+  commit. When you do commit, follow the doc rule above.
 - Changes are only live via `scripts/rebuild.sh`; errors surface in the captured
   daemon log (`/tmp/hyprglaze.log`), not in exit codes.
 - Do not break the config/shader layout in `docs/agents/config.md`.
