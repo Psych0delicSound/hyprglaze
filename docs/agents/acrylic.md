@@ -1,8 +1,9 @@
 # acrylic — design and next steps
 
 `acrylic` is a component effect (`effects/acrylic/`) whose surface is a
-*simulated* pool rather than a shader pattern. This doc records the liquid
-model it targets, the current design, and the agreed next iteration. Read
+**simulated flow field shaping a procedural band pattern** rather than advected
+paint. This doc records the liquid model it targets, the current design, and the
+agreed next iteration. Read
 `docs/agents/layout.md` for where the files live and `docs/effect-porting.md`
 for the component recipe.
 
@@ -61,8 +62,9 @@ turned into a convincing flow field. `acrylic` is now a GPU flow simulation.
 - **Flow field** — a ping-pong pair of `hg_gl.Target`s at `scale` (default
   0.25 of the output). Each frame one pass:
   1. semi-Lagrangian self-advection;
-  2. a few broad vortices **just outside the screen** (`sources`/`source`),
-     which sweep streams in from different directions;
+  2. a few broad vortices **just outside the screen** (`sources`/`source`) at
+     different angles, alternating rotation and pushing inward, so streams
+     enter from different directions and meet;
   3. a divergence-free **ambient curl-noise** force (`ambient`);
   4. **vorticity confinement** (`vorticity`) to keep shear layers curling;
   5. a second-order **momentum** spring-damper (`momentum`) chasing a slowly
@@ -70,11 +72,20 @@ turned into a convincing flow field. `acrylic` is now a GPU flow simulation.
   6. exponential **viscosity** decay;
   7. window drag: a moving rect carries the fluid inside it and pushes a soft
       band ahead of its leading edge.
-- **Paint** — a second ping-pong pair at `dye_scale` (default 0.5). Pigment is
-  semi-Lagrangian advected by the flow, bleeds at `dye_decay`, and is fed by
-  thin veins from a slow noise field; two palette slots pick the pigments.
-  It is stored **premultiplied** (`rgb = colour*coverage`) so the theme black
-  stays the body and filtering does not fog the surface.
+- **Bands** — the native layer is now **procedural**, not advected paint. The
+  display samples the local flow direction and lays long, sinuous
+  Balatro-style contour bands along the stream: the across-flow coordinate is
+  warped mostly *along* the flow, so its level sets stretch into filaments
+  instead of blobs. **Black** is the broad, low-contrast body; **blue** is a
+  narrow vein system; **white** is a rare thin core gated inside a blue vein.
+  Because no colour is advected, the bands keep crisp edges instead of
+  diffusing into a haze.
+- **Warp phase** — a small second ping-pong pair at `warp_scale` (default 0.75)
+  carries a single advected scalar (R). It is *not* paint: the display uses it
+  to offset the band coordinate. The flow drags it, and it relaxes toward a
+  smooth base field at `warp_relax` (default 0.15/s), so a moving window pulls
+  the bands into a wake that lingers for a moment after the flow itself has
+  relaxed — the memory a memoryless band pattern lacks.
 - **Windows** — rects come from `hg_frame`; the component tracks previous rects
   to derive each window's velocity. There is no CPU simulation and no
   `system.zig`.
@@ -84,61 +95,31 @@ turned into a convincing flow field. `acrylic` is now a GPU flow simulation.
   load the component and read `/tmp/hyprglaze.log`.
 
 The reference pieces in `shaders/customs/` (`flow-ref.frag`, `flow-ref2.frag`,
-`flow-ref2-buffer-d.frag`) are partial Shadertoy passes — display + solver
-fragments that still need their Common tab. We took their ideas (stored
-velocity, curl, vorticity confinement, multiscale potential) rather than their
-exact code.
+`flow-ref2-buffer-d.frag`, and the full `flow-ref3*.frag` pass set) are
+Shadertoy passes. We took their ideas (stored velocity, curl, vorticity
+confinement, multiscale potential, and displacement/dispersion along the field)
+rather than their exact code; `flow-ref3` is the elongation/mixing reference the
+band shaping is measured against.
 
 ### Known gaps
 
-- Colour hierarchy: black must dominate the surface, blue second, white a
-  minimum, even when the flow mixes hard.
-- Colour mixing is currently a single blended pigment; acrylic should keep
-  distinct layers that intrude and flex into each other without fully mixing.
-- Momentum is still global enough to rotate the whole surface; the off-screen
-  sources should be the primary motion and push against each other.
 - Windows are hard zero-velocity holes, not smooth laminar deflectors.
-- The Balatro fold is not implemented yet.
 
 ## Next iteration plan
 
-### 1. Colour hierarchy and acrylic layering
-
-- Make the **black liquid the largest source**: much higher injection rate and
-  coverage than blue, with white a rare highlight.
-- Keep pigments in **separate layers** (or premultiplied channels per colour)
-  and advect them with slightly different response, so a fast colour intrudes
-  into a slower one and the boundary flexes instead of averaging to a flat
-  blend.
-- Add a coverage gate that favours black: coloured veins survive only where
-  they are dense, so strong stirring still leaves the surface mostly black.
-- Tune against the **Black Blue OLED** theme (dark blue 50% / light blue 40% /
-  white 10% of the paint, black covering most of the screen).
-
-### 2. Directional sources instead of global rotation
-
-- Reduce or zero the global `momentum` rotation; it currently turns every
-  stream the same way.
-- Use several off-screen sources at different angles and radii, with their own
-  strengths and slow drift, so their streams meet and push oncoming flow.
-- Keep the spring-damper only for a slow, low-amplitude bias.
-
-### 3. Laminar flow around windows
+### 1. Laminar flow around windows
 
 - Replace the hard zero-velocity rect with an obstacle boundary that deflects
   the stream smoothly, and add a little vorticity at the shear edges so the
   wake merges rather than forming rings.
 - Compression ahead of the leading edge, stretch behind.
 
-### 4. Stylize toward the reference (Balatro fold)
+### 2. Acrylic tuning
 
-Bring back the fold from `liquid_balatro_ref.frag` — the two contour bands
-`c1p`/`c2p` — as surface texture driven by the sim:
-
-- reuse the fold's rotated 5-step iteration and contrast modulation;
-- advect the fold input by the flow map and mask it by paint coverage;
-- keep black dominant: thin coloured filaments over the black body;
-- add a `fold` knob (0 = plain dye, 1 = full reference look).
+- Keep tuning the band ratios and the flow against **Black Blue OLED**; black
+  must stay the bulk even when a window mixes hard. Current steady state settles
+  near 8–10% coloured and ~91% near-black.
+- White is a rare vein core; its amount is provisional and will be fine-tuned.
 
 ### Acceptance
 

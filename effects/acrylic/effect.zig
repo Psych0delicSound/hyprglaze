@@ -15,9 +15,16 @@
 //!   * **vorticity confinement** — keeps shear layers curling into eddies;
 //!   * **viscosity** — an exponential decay that bleeds motion away.
 //!
-//! A second half-resolution ping-pong pair carries the paint. It is advected
-//! through the velocity field and fed by thin pigment veins, premultiplied so
-//! the theme black stays the body and the colours stay filaments.
+//! A second ping-pong pair carries a single **warp phase** (R). It is advected
+//! by the flow and relaxed toward a smooth base field. It is not paint: the
+//! display uses it to offset a procedural band coordinate, so a moving window
+//! drags the bands into a wake that lingers after the flow itself has relaxed.
+//!
+//! The native layer is therefore procedural: it samples the local flow
+//! direction and lays long, sinuous Balatro-style contour bands along it. Black
+//! is the broad, low-contrast body; blue is a narrow vein system; white is a
+//! rare thin core inside a blue vein. Nothing colour-like is advected, so the
+//! bands keep crisp edges instead of diffusing into a haze.
 //!
 //! Windows arrive as `hg_frame` rects; this component tracks previous rects to
 //! derive each window's velocity. There is no particle simulation.
@@ -33,7 +40,6 @@ const gl = hg.gl;
 const log = std.log.scoped(.acrylic);
 
 const max_windows = 32;
-const max_palette = 16;
 
 /// Velocity is stored in px/s in a half-float target; this is only the display
 /// full-brightness reference.
@@ -117,18 +123,23 @@ const flow_frag_src: [:0]const u8 =
     \\    // Ambient curl noise: a whole-surface swirl so the pool is never static.
     \\    vel += ambientForce(uv) * (uAmbient * 900.0) * uDt;
     \\
-    \\    // A handful of broad vortices just outside the screen. Their edges
-    \\    // sweep across the surface, which gives long, laminar streams rather
-    \\    // than uniform noise everywhere.
+    \\    // A handful of broad vortices just outside the screen. They sit at
+    \\    // different angles and alternate rotation, and each also pushes a
+    \\    // little inward, so streams enter from different directions and meet.
     \\    for (int i = 0; i < uSources; i++) {
     \\        float fi = float(i);
-    \\        float a = fi * 2.399 + uTime * 0.035;
-    \\        vec2 c = 0.5 + vec2(cos(a), sin(a)) * uAspect * 1.15;
+    \\        float count = max(float(uSources), 1.0);
+    \\        float a = (fi + 0.5) / count * 6.28318 + uTime * 0.02;
+    \\        float var = fract(sin(fi * 12.9898) * 43758.5453);
+    \\        vec2 c = 0.5 + vec2(cos(a), sin(a)) * uAspect * (1.06 + 0.22 * var);
     \\        vec2 d = (uv - c) * uAspect;
     \\        float r2 = dot(d, d);
-    \\        float f = exp(-r2 * 5.0);
+    \\        float f = exp(-r2 * 4.0);
+    \\        float sgn = mod(fi, 2.0) < 0.5 ? 1.0 : -1.0;
     \\        vec2 perp = vec2(-d.y, d.x) / (sqrt(r2) + 0.08);
-    \\        vel += perp * uSource * uDt * f;
+    \\        vec2 dir = normalize(-d);
+    \\        float str = uSource * (0.6 + 0.8 * var);
+    \\        vel += (perp * sgn + dir * 0.55) * str * uDt * f;
     \\    }
     \\
     \\    // Vorticity confinement: sharpen the curl into eddies that outlive it.
@@ -158,7 +169,7 @@ const flow_frag_src: [:0]const u8 =
     \\        // A soft band just outside pushes fluid ahead of a moving window.
     \\        vec2 d = max(lo - uv, uv - hi);
     \\        float outside = max(max(d.x, d.y), 0.0);
-    \\        float band = (1.0 - inside) * exp(-outside * 40.0);
+    \\        float band = (1.0 - inside) * exp(-outside * 16.0);
     \\        vel += uWinVel[i] * uForce * uDt * band;
     \\    }
     \\
@@ -166,9 +177,10 @@ const flow_frag_src: [:0]const u8 =
     \\}
 ;
 
-/// Dye pass: advect the paint with the velocity field, bleed it away slowly,
-/// and keep feeding thin pigment veins. Pigment is premultiplied (rgb =
-/// colour*coverage, a = coverage) so filtering and compositing stay clean.
+/// Warp pass: advects a single scalar `w` (R) with the flow. `w` is not paint;
+/// it is a phase offset for the procedural bands. It relaxes toward a smooth
+/// base field so it keeps its structure, while a window drags it into a wake
+/// that persists for a moment — the memory a memoryless band pattern lacks.
 const dye_frag_src: [:0]const u8 =
     \\#version 300 es
     \\precision highp float;
@@ -178,11 +190,8 @@ const dye_frag_src: [:0]const u8 =
     \\uniform vec2 uOut;
     \\uniform float uDt;
     \\uniform float uTime;
-    \\uniform float uDecay;
-    \\uniform float uSeed;
+    \\uniform float uRelax;
     \\uniform vec2 uAspect;
-    \\uniform vec3 uColA;
-    \\uniform vec3 uColB;
     \\out vec4 fragColor;
     \\
     \\float hash21(vec2 p) {
@@ -215,26 +224,16 @@ const dye_frag_src: [:0]const u8 =
     \\    vec2 uv = gl_FragCoord.xy / uRes;
     \\    vec2 vel = texture(uVel, uv).xy;
     \\
-    \\    // Semi-Lagrangian transport of the paint.
+    \\    // Advect the warp phase along the flow.
     \\    vec2 back = uv - vel * uDt / uOut;
-    \\    vec4 dye = texture(uPrev, back);
-    \\    dye *= exp(-uDecay * uDt);
+    \\    float w = texture(uPrev, clamp(back, 0.0, 1.0)).r;
     \\
-    \\    // Thin veins: the narrow ridge of a slow noise field. The second
-    \\    // field picks the pigment colour, so the veins are not one flat tone.
-    \\    vec2 q = uv * uAspect * 6.0;
-    \\    float n = fbm(q + vec2(uTime * 0.030, -uTime * 0.021));
-    \\    float vein = 1.0 - smoothstep(0.0, 0.032, abs(n - 0.5));
-    \\    float pick = fbm(q * 2.1 + vec2(7.3, -uTime * 0.017));
-    \\    vec3 paint = mix(uColA, uColB, smoothstep(0.35, 0.65, pick));
+    \\    // Relax toward a slow smooth base field, so the warp keeps structure
+    \\    // instead of diffusing away, and drifted dye cannot accumulate.
+    \\    float base = fbm(uv * uAspect * 2.5 + vec2(uTime * 0.006, -uTime * 0.005));
+    \\    w = mix(w, base, clamp(uRelax * uDt, 0.0, 1.0));
     \\
-    \\    float add = vein * uSeed * uDt;
-    \\    dye.rgb += paint * add;
-    \\    dye.a = min(dye.a + add, 1.0);
-    \\    // Keep the pigment premultiplied even after alpha saturates.
-    \\    dye.rgb = min(dye.rgb, vec3(dye.a));
-    \\
-    \\    fragColor = dye;
+    \\    fragColor = vec4(clamp(w, 0.0, 1.0), 0.0, 0.0, 1.0);
     \\}
 ;
 
@@ -249,7 +248,7 @@ const State = struct {
     /// Ping-pong velocity field (RG = velocity px/s).
     vel: [2]hg_gl.Target = .{ .{}, .{} },
     cur: u1 = 0,
-    /// Ping-pong paint field (premultiplied RGB + coverage A).
+    /// Ping-pong warp field: a single advected phase in R.
     dye: [2]hg_gl.Target = .{ .{}, .{} },
     dye_cur: u1 = 0,
     flow_prog: hg_gl.Program = .{},
@@ -257,19 +256,16 @@ const State = struct {
     gl_ready: bool = false,
     gl_failed: bool = false,
 
-    viscosity: f32 = 3.0,
-    momentum: f32 = 0.15,
-    force: f32 = 5.0,
-    ambient: f32 = 0.04,
+    viscosity: f32 = 1.5,
+    momentum: f32 = 0.05,
+    force: f32 = 18.0,
+    ambient: f32 = 0.02,
     /// Single-scale confinement is grid-sensitive: keep it subtle until the
     /// multiscale version (flow-ref2) lands.
     vorticity: f32 = 0.02,
-    sources: u32 = 3,
-    source: f32 = 350.0,
-    dye_decay: f32 = 0.12,
-    seed: f32 = 2.0,
-    paint_a: [3]f32 = .{ 0.87, 0.27, 0.23 },
-    paint_b: [3]f32 = .{ 0.20, 0.45, 0.90 },
+    sources: u32 = 4,
+    source: f32 = 450.0,
+    warp_relax: f32 = 0.15,
 
     // Global current: velocity and its phase (second-order so it overshoots).
     cur_vel: [2]f32 = .{ 0, 0 },
@@ -312,11 +308,8 @@ const State = struct {
         .out = "uOut",
         .dt = "uDt",
         .time = "uTime",
-        .decay = "uDecay",
-        .seed = "uSeed",
+        .relax = "uRelax",
         .aspect = "uAspect",
-        .cola = "uColA",
-        .colb = "uColB",
     }) = .{},
     du: hg.Uniforms(.{
         .vel = "iAcrFlowTex",
@@ -338,7 +331,7 @@ fn create(host: [*c]const c.hg_host, width: f32, height: f32) callconv(.c) ?*any
     const sim_h: i32 = @intFromFloat(@max(32.0, @round(height * scale)));
     // Paint wants more detail than the velocity, so it runs at half the output
     // unless the user asks for less.
-    const dscale = std.math.clamp(hp.getFloat("dye_scale", 0.5), scale, 1.0);
+    const dscale = std.math.clamp(hp.getFloat("warp_scale", 0.75), scale, 1.0);
     const dye_w: i32 = @intFromFloat(@max(64.0, @round(width * dscale)));
     const dye_h: i32 = @intFromFloat(@max(64.0, @round(height * dscale)));
 
@@ -349,15 +342,14 @@ fn create(host: [*c]const c.hg_host, width: f32, height: f32) callconv(.c) ?*any
         .sim_h = sim_h,
         .dye_w = dye_w,
         .dye_h = dye_h,
-        .viscosity = std.math.clamp(hp.getFloat("viscosity", 3.0), 0.0, 8.0),
-        .momentum = std.math.clamp(hp.getFloat("momentum", 0.15), 0.0, 3.0),
-        .force = std.math.clamp(hp.getFloat("force", 5.0), 0.0, 40.0),
-        .ambient = std.math.clamp(hp.getFloat("ambient", 0.04), 0.0, 4.0),
+        .viscosity = std.math.clamp(hp.getFloat("viscosity", 1.5), 0.0, 8.0),
+        .momentum = std.math.clamp(hp.getFloat("momentum", 0.05), 0.0, 3.0),
+        .force = std.math.clamp(hp.getFloat("force", 18.0), 0.0, 40.0),
+        .ambient = std.math.clamp(hp.getFloat("ambient", 0.02), 0.0, 4.0),
         .vorticity = std.math.clamp(hp.getFloat("vorticity", 0.02), 0.0, 0.2),
-        .sources = @intCast(std.math.clamp(hp.getInt("sources", 3), 0, 8)),
-        .source = std.math.clamp(hp.getFloat("source", 350.0), 0.0, 2000.0),
-        .dye_decay = std.math.clamp(hp.getFloat("dye_decay", 0.12), 0.0, 4.0),
-        .seed = std.math.clamp(hp.getFloat("seed", 2.0), 0.0, 20.0),
+        .sources = @intCast(std.math.clamp(hp.getInt("sources", 4), 0, 8)),
+        .source = std.math.clamp(hp.getFloat("source", 450.0), 0.0, 2000.0),
+        .warp_relax = std.math.clamp(hp.getFloat("warp_relax", 0.15), 0.02, 8.0),
     };
     return @ptrCast(state);
 }
@@ -424,16 +416,6 @@ fn update(handle: ?*anyopaque, frame: [*c]const c.hg_frame) callconv(.c) void {
     }
     s.prev_count = n;
     s.win_count = n;
-
-    // Palette snapshot for the paint (frame pointers die at return). Dark and
-    // light ends keep the two pigments related to the theme.
-    const plen: usize = if (f.palette == null) 0 else @min(f.palette_len, max_palette);
-    if (plen > 4) {
-        s.paint_a = .{ f.palette[4 * 3 + 0], f.palette[4 * 3 + 1], f.palette[4 * 3 + 2] };
-    }
-    if (plen > 12) {
-        s.paint_b = .{ f.palette[12 * 3 + 0], f.palette[12 * 3 + 1], f.palette[12 * 3 + 2] };
-    }
 }
 
 fn ensureGl(s: *State) bool {
@@ -446,7 +428,7 @@ fn ensureGl(s: *State) bool {
         return false;
     };
     s.dye_prog = hg_gl.Program.init(dye_frag_src) catch {
-        log.err("dye program failed", .{});
+        log.err("warp program failed", .{});
         return false;
     };
     for (&s.vel) |*tg| {
@@ -515,7 +497,7 @@ fn upload(handle: ?*anyopaque, program: u32) callconv(.c) void {
     gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
     s.cur = next;
 
-    // --- dye pass: advect the paint through the new velocity field ---
+    // --- warp pass: advect the band phase through the new velocity field ---
     const dprev = s.dye_cur;
     const dnext = 1 - dprev;
     s.dye[dnext].begin();
@@ -528,11 +510,8 @@ fn upload(handle: ?*anyopaque, program: u32) callconv(.c) void {
     s.yu.f2(.out, s.width, s.height);
     s.yu.f1(.dt, s.last_dt);
     s.yu.f1(.time, @floatCast(@mod(s.now, 3600.0)));
-    s.yu.f1(.decay, s.dye_decay);
-    s.yu.f1(.seed, s.seed);
+    s.yu.f1(.relax, s.warp_relax);
     s.yu.f2(.aspect, s.width / s.height, 1.0);
-    s.yu.f3(.cola, s.paint_a[0], s.paint_a[1], s.paint_a[2]);
-    s.yu.f3(.colb, s.paint_b[0], s.paint_b[1], s.paint_b[2]);
     s.dye_prog.draw();
     gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
     s.dye_cur = dnext;
