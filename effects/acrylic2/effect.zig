@@ -102,7 +102,7 @@ const State = struct {
     win_band: f32 = 10.0, // surface px
     win_corner: f32 = 14.0, // surface px
     win_speed: f32 = 700.0, // surface px/s that maps to a field value of 1
-    win_slip: f32 = 0.85, // 0..1
+    win_slip: f32 = 0.0, // 0..1
     tracked: [max_windows]Tracked = [_]Tracked{.{}} ** max_windows,
     tracked_count: usize = 0,
 
@@ -134,7 +134,7 @@ fn create(host: [*c]const c.hg_host, width: f32, height: f32) callconv(.c) ?*any
         .win_band = @max(hp.getFloat("win_band", 10.0), 0.0),
         .win_corner = @max(hp.getFloat("win_corner", 14.0), 0.0),
         .win_speed = @max(hp.getFloat("win_speed", 700.0), 1.0),
-        .win_slip = std.math.clamp(hp.getFloat("win_slip", 0.85), 0.0, 1.0),
+        .win_slip = std.math.clamp(hp.getFloat("win_slip", 0.0), 0.0, 1.0),
     };
     return @ptrCast(state);
 }

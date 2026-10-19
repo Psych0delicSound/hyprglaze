@@ -90,18 +90,24 @@ original code, so those passes bind a 1×1 placeholder.
 ### Windows
 
 flow-ref3 has no window interaction. This port adds one, additively: every
-window is a **solid rigid body** in the flow.
+window is a **rigid body** in the flow.
 
 `hgObstacle()` (generated into the GLSL) is applied to Buffer A's `.xy` and
 `.zw`, Buffer B's velocity `.xy`, and Buffer C's `.xy` (0.5-centred velocity).
-For each window it builds a rounded-box SDF and a boundary layer:
+For each window it builds a rounded-box SDF, but only inside a thin band at the
+surface and in the interior — never globally:
 
 - **no penetration** — the inward normal component of the field is removed, so
   the flow bends around the window instead of crossing it;
-- **no-slip** — the field decays toward the body's own velocity across a band
-  of `win_band` px, so a moving window drags a wake;
-- **solid interior** — inside the rect the field moves exactly with the body
-  (a static window shows a static interior).
+- **moving wall** — the condition is relative to the window's own velocity, so
+  a window moving into the flow pushes it aside;
+- **no solid interior** — the field is not frozen or overwritten inside the
+  rect. Doing that made the displacement collapse to zero in the window and
+  drew a bright ring around it (and, with the outward normal reaching across
+  the screen, pulled distant flows toward the window like a magnet). The body
+  acts only at its surface, so the visible flow stays continuous.
+- **optional no-slip** — `win_slip > 0` adds a viscous drag at the surface;
+  the default is free slip, push-only.
 
 Window rects and per-window velocities are tracked in `update()` from
 `hg_frame.windows` (velocities from the centre delta; the host only supplies the
@@ -121,7 +127,8 @@ they are scaled by `scale` into buffer pixels before upload.
   (default `14`).
 - `win_speed` — the window speed in px/s that maps to a field value of `1`
   (default `700`); body velocity is clamped to a unit vector in field space.
-- `win_slip` — `0..1`, how hard the wall drags the flow (default `0.85`).
+- `win_slip` — `0..1`, optional no-slip drag at the window surface (default
+  `0.0`, free slip: windows push and deflect the flow but never pull it).
 
 ## Verify
 

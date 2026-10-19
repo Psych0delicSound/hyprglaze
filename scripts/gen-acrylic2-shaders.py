@@ -88,15 +88,19 @@ vec2 hgObstacle(vec2 v, vec2 px) {
         vec2 hi = w.xy + w.zw;
         float r = min(uWinCorner, min(w.z, w.w) * 0.5);
         float sd = hgSdBox(px, lo, hi, r);
+        // The body only exists at its surface and inside it. Without this
+        // gate the outward normal reaches across the whole screen and drags
+        // every flow toward the window.
+        if (sd > uWinBand) continue;
+
         vec2 nrm = hgBoxNormal(px, lo, hi, r);
-        float infl = exp(-max(sd, 0.0) / max(uWinBand, 1.0));
-        float inside = 1.0 - step(0.0, sd);
+        float t = clamp(1.0 - sd / max(uWinBand, 1.0), 0.0, 1.0);
 
         vec2 body = uWinVel[i] / max(uWinScale, 1.0);
         body = length(body) > 1.0 ? normalize(body) : body;
         vec2 rel = v - body;
         rel -= nrm * min(dot(rel, nrm), 0.0);          // no penetration
-        rel *= (1.0 - uWinNoSlip * infl) * (1.0 - inside);
+        rel *= 1.0 - uWinNoSlip * t;                   // optional no-slip
         v = body + rel;
     }
     return v;

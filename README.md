@@ -130,7 +130,7 @@ theme = "Rosé Pine"
 # win_band   = 10    # window boundary-layer thickness, px
 # win_corner = 14    # corner radius of the window obstacle, px
 # win_speed  = 700   # window speed (px/s) that maps to a field value of 1
-# win_slip   = 0.85  # 0..1: how hard a window drags the flow at its surface
+# win_slip   = 0.0   # 0..1: no-slip drag at the window surface; 0 = free slip
 
 [fur]
 # spacing = 23.0      # follicle spacing in px; finer shimmers and reads as noise
