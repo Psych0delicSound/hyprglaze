@@ -30,15 +30,15 @@ of the same name, so porting is always additive: the union variant stays as a
 | moire | ⬜ | raw waveform + bands |
 | particles | ⬜ | particle solver + palette |
 | laser | ⬜ | ray tracer + palette + clock + spectral |
-| starfield | ⬜ | FBO + geometry painter + spectral + palette; shared `[visualizer]` section |
-| glitch | ⬜ | own program + FBO + spectral + RNG |
-| milkdrop | ⬜ | FBO feedback + geometry + presets + spectral + palette; shared `[visualizer]` section |
+| starfield | ✅ component | FBO (`hg_gl.Target`) + `hg_geometry` painter + spectral + palette; `.config_section = "visualizer"` |
+| glitch | ✅ component | own program + FBO (via `hg_gl.Target`) + spectral + RNG |
+| milkdrop | ✅ component | ping-pong `hg_gl.Target` feedback + warp `hg_gl.Program` + `hg_geometry` + copied `presets.zig` + spectral + palette; `.config_section = "visualizer"` |
 | liquid2 / `custom` | n/a | already the stateless fallback context; not ported |
 
 Audio flavour of the pending set (what the component must feed its analyzer):
 * **raw waveform** (`hg_frame.wave` → `hg.audio.Splitter`): voltaic, moire.
 * **spectral** (`hg.audio.Analyzer` FFT bands + kicks): windowglow, fur, fluid,
-  whorl, amorphous, flux, cellbloom, ivy, laser, starfield, glitch, milkdrop.
+  whorl, amorphous, flux, cellbloom, ivy, laser.
 * **none**: tide, concentric, particles.
 
 ## The standard port recipe
@@ -64,38 +64,29 @@ Audio flavour of the pending set (what the component must feed its analyzer):
 ## Unique context features (what the ABI/SDK does not yet express)
 
 These are the real porting prerequisites — everything else is mechanical.
+Items 1–3 are **done**; 4–7 are per-port notes, not ABI work.
 
-1. **Shared config section.** `paramSection()` makes `starfield` and `milkdrop`
-   read the shared `[visualizer]` section, not their own. The component host
-   currently keys params (and the host-side `music`/`sink` audio lookup) on the
-   effect name, so a naive port would read `[starfield]`/`[milkdrop]` and lose
-   its audio settings.
-   *Fix:* add `const char* config_section` to `hg_module` (NULL ⇒ use `id`) and
-   have `Instance.maybeCreate` use it for both the params ctx and the audio
-   flags. Bump `HG_ABI_VERSION`.
+1. **Shared config section.** ✅ `hg_module.config_section` (`const char*`,
+   NULL/empty ⇒ `id`) landed alongside `HG_ABI_VERSION 2`. `Instance.maybeCreate`
+   reads params and the host-side `music`/`sink` audio flags from that section,
+   so `starfield`/`milkdrop` set `.config_section = "visualizer"`.
 
-2. **Own offscreen / feedback pass.** `glitch`, `milkdrop`, `starfield`
-   (and now swarm) render an extra pass into an FBO and hand the texture to the
-   main shader. `hg_gl.Program` covers the *program*; the FBO + colour texture +
-   resize + ping-pong lifecycle is still per-effect.
-   *Fix (optional):* add `hg_gl.Target` (create/resize/bind texture + FBO,
-   `deinit`) to `sdk/hg_gl.zig`. swarm currently does this by hand and can be
-   migrated onto it later.
+2. **Own offscreen / feedback pass.** ✅ `hg_gl.Target` (RGBA8/RGBA16F colour
+   texture + FBO, resize, `begin`/`end`, optional mipmaps, `deinit`) landed in
+   `sdk/hg_gl.zig`; `glitch` uses it for its ping-pong feedback targets and
+   `milkdrop` for its feedback ping-pong (two targets). swarm
+   still does this by hand and can migrate later.
 
-3. **Shared CPU→GL painter.** `src/effects/geometry.zig` (346 lines: faded
-   lines, dots, filled polygons, frames, built into a CPU `Batch` and drawn by a
-   `Painter` with additive/alpha blending) is shared by `milkdrop` and
-   `starfield`.
-   *Fix:* move it to `sdk/hg_geometry.zig` (add to `sdk_modules`) so both
-   components import one copy, or duplicate it per component if the SDK should
-   stay shader-only.
+3. **Shared CPU→GL painter.** ✅ moved to `sdk/hg_geometry.zig` (in
+   `sdk_modules`); `src/effects/geometry.zig` is now a re-export shim so the
+   built-ins and the `milkdrop`/`starfield` components share one copy.
 
 4. **Self-contained solvers/tables to copy locally.**
    * `particles/system.zig` (556 lines) — the full ball/pop/collider solver;
      `particles` only.
    * `laser/trace.zig` (169 lines) — ray-vs-AABB reflection; `laser` only.
    * `milkdrop/presets.zig` (507 lines) — embedded per-frame preset equations;
-     `milkdrop` only.
+     `milkdrop` only (copied into the component).
    * `clock.zig` (23 lines) — `phase`/`cycles`; copy locally (swarm did) or
      promote to the SDK.
 
@@ -117,17 +108,18 @@ These are the real porting prerequisites — everything else is mechanical.
 
 ## Remaining ABI gaps
 
-* `hg_module.config_section` (item 1). Everything else is SDK-local (items 2–4)
-  or already covered.
+None. `config_section` (item 1) landed with `HG_ABI_VERSION 2`; `hg_gl.Target`
+(item 2) and `hg_geometry.zig` (item 3) are SDK-local and in place. The rest of
+the pending ports are mechanical transliteration plus their local solvers.
 
 ## Suggested order
 
 1. Cheap wins, no new capabilities — validates the recipe across flavours:
    `tide`, `concentric`, `fire`, `windowglow`, `fur`, `fluid`, `whorl`.
 2. Audio + clock: `amorphous`, `flux`, `cellbloom`, `voltaic`, `moire`, `ivy`.
-3. Add `hg_gl.Target` (item 2), then `glitch`.
-4. Add `config_section` (item 1) + move `geometry.zig` to the SDK (item 3),
-   then `starfield`, `laser`, `particles`, `milkdrop`.
+3. ✅ `hg_gl.Target` (item 2) + `glitch`.
+4. ✅ `config_section` (item 1) + `hg_geometry.zig` (item 3) moved to the SDK, and
+   `starfield` then `milkdrop` ported on top. `laser`, `particles` remain.
 5. **Phase 4** once every current built-in has a component: delete the union
    variants, `shaderOf`, `defaultShaderFor`, and the `custom` fallback plumbing
    (or keep a slim stateless path only for user `<subdir>/<frag>.frag` shaders).
