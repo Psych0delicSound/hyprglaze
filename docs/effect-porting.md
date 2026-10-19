@@ -29,7 +29,7 @@ of the same name, so porting is always additive: the union variant stays as a
 | voltaic | ⬜ | raw waveform + bands + clock |
 | moire | ⬜ | raw waveform + bands |
 | particles | ⬜ | particle solver + palette |
-| laser | ⬜ | ray tracer + palette + clock + spectral |
+| laser | ✅ component | ray solver (`trace.zig`) + f64 `clock.zig` copied locally + spectral (bands + kicks) + palette via the host's standard uniforms |
 | starfield | ✅ component | FBO (`hg_gl.Target`) + `hg_geometry` painter + spectral + palette; `.config_section = "visualizer"` |
 | glitch | ✅ component | own program + FBO (via `hg_gl.Target`) + spectral + RNG |
 | milkdrop | ✅ component | ping-pong `hg_gl.Target` feedback + warp `hg_gl.Program` + `hg_geometry` + copied `presets.zig` + spectral + palette; `.config_section = "visualizer"` |
@@ -38,7 +38,7 @@ of the same name, so porting is always additive: the union variant stays as a
 Audio flavour of the pending set (what the component must feed its analyzer):
 * **raw waveform** (`hg_frame.wave` → `hg.audio.Splitter`): voltaic, moire.
 * **spectral** (`hg.audio.Analyzer` FFT bands + kicks): windowglow, fur, fluid,
-  whorl, amorphous, flux, cellbloom, ivy, laser.
+  whorl, amorphous, flux, cellbloom, ivy.
 * **none**: tide, concentric, particles.
 
 ## The standard port recipe
@@ -84,11 +84,12 @@ Items 1–3 are **done**; 4–7 are per-port notes, not ABI work.
 4. **Self-contained solvers/tables to copy locally.**
    * `particles/system.zig` (556 lines) — the full ball/pop/collider solver;
      `particles` only.
-   * `laser/trace.zig` (169 lines) — ray-vs-AABB reflection; `laser` only.
+   * `laser/trace.zig` (169 lines) — ray-vs-AABB reflection; copied into
+     `effects/laser/`.
    * `milkdrop/presets.zig` (507 lines) — embedded per-frame preset equations;
      `milkdrop` only (copied into the component).
-   * `clock.zig` (23 lines) — `phase`/`cycles`; copy locally (swarm did) or
-     promote to the SDK.
+   * `clock.zig` (23 lines) — `phase`/`cycles`; copy locally (swarm and laser
+     did) or promote to the SDK.
 
 5. **RNG seeded from the wall clock.** `amorphous`, `glitch`, `milkdrop`,
    `starfield` seed `std.Random.DefaultPrng` from `iohelp.nowNs()`. Plugins can
@@ -119,7 +120,7 @@ the pending ports are mechanical transliteration plus their local solvers.
 2. Audio + clock: `amorphous`, `flux`, `cellbloom`, `voltaic`, `moire`, `ivy`.
 3. ✅ `hg_gl.Target` (item 2) + `glitch`.
 4. ✅ `config_section` (item 1) + `hg_geometry.zig` (item 3) moved to the SDK, and
-   `starfield` then `milkdrop` ported on top. `laser`, `particles` remain.
+   `starfield`, `milkdrop` then `laser` ported on top. `particles` remains.
 5. **Phase 4** once every current built-in has a component: delete the union
    variants, `shaderOf`, `defaultShaderFor`, and the `custom` fallback plumbing
    (or keep a slim stateless path only for user `<subdir>/<frag>.frag` shaders).
