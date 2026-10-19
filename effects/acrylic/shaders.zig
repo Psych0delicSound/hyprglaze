@@ -1,5 +1,5 @@
-//! effects/acrylic2/shaders.zig - generated from the flow-ref3 Shadertoy
-//! passes by scripts/gen-acrylic2-shaders.py. Do not hand-edit.
+//! effects/acrylic/shaders.zig - generated from the flow-ref3 Shadertoy
+//! passes by scripts/gen-acrylic-shaders.py. Do not hand-edit.
 
 pub const pass_a: [:0]const u8 =
     \\#version 300 es
@@ -143,6 +143,10 @@ pub const pass_a: [:0]const u8 =
     \\uniform float uWinBand;    // boundary-layer thickness (buffer px)
     \\uniform float uWinCorner;  // rounded corner radius  (buffer px)
     \\uniform float uWinNoSlip;  // 0..1, how hard the wall drags the flow
+    \\uniform float uWinPush;    // 0..1, how hard the body damps its interior flow
+    \\uniform float uWinTurn;    // 0..1, inflow bent into an edge-parallel slide
+    \\uniform float uWinCurl;    // extra swirl added to the slide
+    \\uniform float uWinWall;    // 0..1, push ahead of a moving window's bounds
     \\
     \\float hgSdBox(vec2 p, vec2 lo, vec2 hi, float r) {
     \\    vec2 c = (lo + hi) * 0.5;
@@ -181,7 +185,35 @@ pub const pass_a: [:0]const u8 =
     \\        vec2 body = uWinVel[i] / max(uWinScale, 1.0);
     \\        body = length(body) > 1.0 ? normalize(body) : body;
     \\        vec2 rel = v - body;
-    \\        rel -= nrm * min(dot(rel, nrm), 0.0);          // no penetration
+    \\
+    \\        // Inflow that would cross the wall, captured before it is removed.
+    \\        float vn = dot(rel, nrm);
+    \\        float inflow = -min(vn, 0.0);
+    \\
+    \\        // No penetration: drop the inward normal component (this is the
+    \\        // magnet-fix projection, kept as the base).
+    \\        rel -= nrm * min(vn, 0.0);
+    \\
+    \\        if (sd < 0.0) {
+    \\            // Nothing may live under the window. Damp the whole field from
+    \\            // the edge inward, so the interior settles to no flow instead of
+    \\            // keeping a window-shaped imprint that leaks out as a trail.
+    \\            float inside = clamp(-sd / max(uWinBand, 1.0), 0.0, 1.0);
+    \\            rel *= 1.0 - clamp(uWinPush, 0.0, 1.0) * inside;
+    \\        } else {
+    \\            // Surface: bend the removed inflow along the edge and add a swirl
+    \\            // so a head-on stream rolls around the body instead of piling up.
+    \\            vec2 tang = rel - nrm * dot(rel, nrm);
+    \\            float tl = length(tang);
+    \\            vec2 tdir = tl > 1e-5 ? tang / tl : vec2(-nrm.y, nrm.x);
+    \\            rel += tdir * inflow * uWinTurn;
+    \\            rel += vec2(-nrm.y, nrm.x) * (uWinCurl * t * inflow);
+    \\            // Push relative to the bounds: project the window's own motion on
+    \\            // the outward normal, so the leading edge shoves flow ahead of it.
+    \\            float wall = max(dot(body, nrm), 0.0);
+    \\            rel += nrm * wall * uWinWall * t;
+    \\        }
+    \\
     \\        rel *= 1.0 - uWinNoSlip * t;                   // optional no-slip
     \\        v = body + rel;
     \\    }
@@ -198,8 +230,8 @@ pub const pass_a: [:0]const u8 =
     \\#define _G2 0.0625
     \\#define W0 -3.0
     \\#define W1 0.5
-    \\#define TIMESTEP 0.1
-    \\#define ADVECT_DIST 2.0
+    \\#define TIMESTEP 0.007
+    \\#define ADVECT_DIST 0.3
     \\#define DV 0.70710678
     \\
     \\// nonlinearity
@@ -491,6 +523,10 @@ pub const pass_b: [:0]const u8 =
     \\uniform float uWinBand;    // boundary-layer thickness (buffer px)
     \\uniform float uWinCorner;  // rounded corner radius  (buffer px)
     \\uniform float uWinNoSlip;  // 0..1, how hard the wall drags the flow
+    \\uniform float uWinPush;    // 0..1, how hard the body damps its interior flow
+    \\uniform float uWinTurn;    // 0..1, inflow bent into an edge-parallel slide
+    \\uniform float uWinCurl;    // extra swirl added to the slide
+    \\uniform float uWinWall;    // 0..1, push ahead of a moving window's bounds
     \\
     \\float hgSdBox(vec2 p, vec2 lo, vec2 hi, float r) {
     \\    vec2 c = (lo + hi) * 0.5;
@@ -529,7 +565,35 @@ pub const pass_b: [:0]const u8 =
     \\        vec2 body = uWinVel[i] / max(uWinScale, 1.0);
     \\        body = length(body) > 1.0 ? normalize(body) : body;
     \\        vec2 rel = v - body;
-    \\        rel -= nrm * min(dot(rel, nrm), 0.0);          // no penetration
+    \\
+    \\        // Inflow that would cross the wall, captured before it is removed.
+    \\        float vn = dot(rel, nrm);
+    \\        float inflow = -min(vn, 0.0);
+    \\
+    \\        // No penetration: drop the inward normal component (this is the
+    \\        // magnet-fix projection, kept as the base).
+    \\        rel -= nrm * min(vn, 0.0);
+    \\
+    \\        if (sd < 0.0) {
+    \\            // Nothing may live under the window. Damp the whole field from
+    \\            // the edge inward, so the interior settles to no flow instead of
+    \\            // keeping a window-shaped imprint that leaks out as a trail.
+    \\            float inside = clamp(-sd / max(uWinBand, 1.0), 0.0, 1.0);
+    \\            rel *= 1.0 - clamp(uWinPush, 0.0, 1.0) * inside;
+    \\        } else {
+    \\            // Surface: bend the removed inflow along the edge and add a swirl
+    \\            // so a head-on stream rolls around the body instead of piling up.
+    \\            vec2 tang = rel - nrm * dot(rel, nrm);
+    \\            float tl = length(tang);
+    \\            vec2 tdir = tl > 1e-5 ? tang / tl : vec2(-nrm.y, nrm.x);
+    \\            rel += tdir * inflow * uWinTurn;
+    \\            rel += vec2(-nrm.y, nrm.x) * (uWinCurl * t * inflow);
+    \\            // Push relative to the bounds: project the window's own motion on
+    \\            // the outward normal, so the leading edge shoves flow ahead of it.
+    \\            float wall = max(dot(body, nrm), 0.0);
+    \\            rel += nrm * wall * uWinWall * t;
+    \\        }
+    \\
     \\        rel *= 1.0 - uWinNoSlip * t;                   // optional no-slip
     \\        v = body + rel;
     \\    }
@@ -590,10 +654,10 @@ pub const pass_b: [:0]const u8 =
     \\    const float ds = -12.0; // divergence scale
     \\    const float dp = -6.0; // divergence update scale
     \\    const float pl = 0.3;   // divergence smoothing
-    \\    const float ad = 6.0;   // advection distance scale
+    \\    const float ad = 0.45;   // advection distance scale
     \\    const float pwr = 1.0;  // power when deriving rotation angle from curl
     \\    const float amp = 1.0;  // self-amplification
-    \\    const float upd = 0.99;  // update smoothing
+    \\    const float upd = 0.9997;  // update smoothing
     \\    const float sq2 = 0.6;  // diagonal weight
     \\    
     \\    vec2 vUv = fragCoord.xy / iResolution.xy;
@@ -810,6 +874,10 @@ pub const pass_c: [:0]const u8 =
     \\uniform float uWinBand;    // boundary-layer thickness (buffer px)
     \\uniform float uWinCorner;  // rounded corner radius  (buffer px)
     \\uniform float uWinNoSlip;  // 0..1, how hard the wall drags the flow
+    \\uniform float uWinPush;    // 0..1, how hard the body damps its interior flow
+    \\uniform float uWinTurn;    // 0..1, inflow bent into an edge-parallel slide
+    \\uniform float uWinCurl;    // extra swirl added to the slide
+    \\uniform float uWinWall;    // 0..1, push ahead of a moving window's bounds
     \\
     \\float hgSdBox(vec2 p, vec2 lo, vec2 hi, float r) {
     \\    vec2 c = (lo + hi) * 0.5;
@@ -848,7 +916,35 @@ pub const pass_c: [:0]const u8 =
     \\        vec2 body = uWinVel[i] / max(uWinScale, 1.0);
     \\        body = length(body) > 1.0 ? normalize(body) : body;
     \\        vec2 rel = v - body;
-    \\        rel -= nrm * min(dot(rel, nrm), 0.0);          // no penetration
+    \\
+    \\        // Inflow that would cross the wall, captured before it is removed.
+    \\        float vn = dot(rel, nrm);
+    \\        float inflow = -min(vn, 0.0);
+    \\
+    \\        // No penetration: drop the inward normal component (this is the
+    \\        // magnet-fix projection, kept as the base).
+    \\        rel -= nrm * min(vn, 0.0);
+    \\
+    \\        if (sd < 0.0) {
+    \\            // Nothing may live under the window. Damp the whole field from
+    \\            // the edge inward, so the interior settles to no flow instead of
+    \\            // keeping a window-shaped imprint that leaks out as a trail.
+    \\            float inside = clamp(-sd / max(uWinBand, 1.0), 0.0, 1.0);
+    \\            rel *= 1.0 - clamp(uWinPush, 0.0, 1.0) * inside;
+    \\        } else {
+    \\            // Surface: bend the removed inflow along the edge and add a swirl
+    \\            // so a head-on stream rolls around the body instead of piling up.
+    \\            vec2 tang = rel - nrm * dot(rel, nrm);
+    \\            float tl = length(tang);
+    \\            vec2 tdir = tl > 1e-5 ? tang / tl : vec2(-nrm.y, nrm.x);
+    \\            rel += tdir * inflow * uWinTurn;
+    \\            rel += vec2(-nrm.y, nrm.x) * (uWinCurl * t * inflow);
+    \\            // Push relative to the bounds: project the window's own motion on
+    \\            // the outward normal, so the leading edge shoves flow ahead of it.
+    \\            float wall = max(dot(body, nrm), 0.0);
+    \\            rel += nrm * wall * uWinWall * t;
+    \\        }
+    \\
     \\        rel *= 1.0 - uWinNoSlip * t;                   // optional no-slip
     \\        v = body + rel;
     \\    }
@@ -926,12 +1022,12 @@ pub const pass_c: [:0]const u8 =
     \\    
     \\     vec2 uv = fragCoord/iResolution.xy; // Normalized pixel coordinates (from 0 to 1)
     \\
-    \\  vec4 col = texture(uCh0,fract((pos+v*vec2(-1,1)*2.0)/Res.xy));
-    \\  vec4 col2 = texture(uCh3,fract((pos+v*vec2(-1,1)*2.0)/Res.xy));
+    \\  vec4 col = texture(uCh0,fract((pos+v*vec2(-1,1)*0.12)/Res.xy));
+    \\  vec4 col2 = texture(uCh3,fract((pos+v*vec2(-1,1)*0.12)/Res.xy));
     \\  vec4 blend = mix(col,col2,(0.25) );
     \\  
     \\  fragColor=blend;
-    \\  //  fragColor=texture(uCh0,fract((pos+v*vec2(-1,1)*2.0)/Res.xy));
+    \\  //  fragColor=texture(uCh0,fract((pos+v*vec2(-1,1)*0.12)/Res.xy));
     \\    
     \\    // add a little "motor" in the center
     \\    vec2 scr=(fragCoord.xy/Res.xy)*2.0-vec2(1.0);
@@ -943,9 +1039,7 @@ pub const pass_c: [:0]const u8 =
     \\out vec4 hg_fragColor;
     \\void main() {
     \\    mainImage(hg_fragColor, gl_FragCoord.xy);
-    \\    vec2 vC = hg_fragColor.xy - 0.5;
-    \\    vC = hgObstacle(vC, gl_FragCoord.xy);
-    \\    hg_fragColor.xy = vC + 0.5;
+    \\    hg_fragColor.xy = hgObstacle(hg_fragColor.xy, gl_FragCoord.xy);
     \\}
 ;
 

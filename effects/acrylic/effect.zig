@@ -1,40 +1,34 @@
-//! effects/acrylic — a viscous, theme-black liquid driven by a GPU flow field.
+//! effects/acrylic — a faithful, 1:1 port of the flow-ref3 Shadertoy
+//! ("kind of viscous, like honey", https://www.shadertoy.com/view/7sGGRD).
 //!
-//! The surface is a velocity field that lives on the GPU in a ping-pong pair of
-//! `hg_gl.Target`s. Each frame a fragment pass self-advects it
-//! (semi-Lagrangian), then adds the drives:
+//! flow-ref3 chains five passes. Buffer A and Buffer B are *dynamical systems*
+//! — a "fracturing" field (MsyXRW) and a fluid-like field (XddSRX) — Buffer C
+//! is flockaroo's rotational single-pass CFD, Buffer D is xenn's lava-lamp
+//! feedback, and the Image pass displaces a colour input along A's field with
+//! chromatic dispersion. This component keeps every pass, every constant and
+//! the exact channel graph from the Shadertoy JSON:
 //!
-//!   * **windows** — each rect is a rigid body: flow cannot pass through it,
-//!     the interior is bled to a stop and nudged gently out, and a soft band
-//!     just outside follows the frame so the paint stretches with it;
-//!   * **off-screen sources** — a few broad vortices just outside the viewport
-//!     sweep streams in from different directions, so the whole surface moves
-//!     without a single uniform rotation;
-//!   * **ambient curl noise** — a divergence-free whole-surface swirl;
-//!   * **momentum** — a global current, a second-order spring-damper chasing a
-//!     slowly rotating target (it overshoots, so the drift reverses);
-//!   * **vorticity confinement** — keeps shear layers curling into eddies;
-//!   * **viscosity** — an exponential decay that bleeds motion away.
+//!     A <- D(prev), noise, keyboard
+//!     B <- A
+//!     C <- C(prev), noise, colour, B
+//!     D <- B, colour, C, B
+//!     Image <- D, colour, C
 //!
-//! A second ping-pong pair carries a 2D **material displacement** (RG). It is
-//! advected by the flow and bled back toward zero so it stays anchored. It is
-//! not paint: the display samples the procedural bands at `uv + disp`, so the
-//! pattern is *carried by the flow* — it travels and stretches with the stream
-//! and keeps its form, instead of being re-derived from the current direction
-//! each frame. A window deforms `disp` locally and the deformation lingers,
-//! while the rest of the surface is left alone.
+//! The GLSL lives in `shaders.zig` (generated from the original `.frag` files,
+//! bodies verbatim) and `acrylic.frag` (the Image pass, loaded by the host).
+//! `scripts/gen-acrylic-shaders.py` documents the only changes: Shadertoy
+//! plumbing, window rigid bodies appended to Buffers A/B/C, and a palette
+//! colour source in place of the reference's colour texture.
 //!
-//! The native layer is therefore procedural bands in the carried coordinate.
-//! Black is the broad, low-contrast body; blue is a narrow vein system; white
-//! is a rare thin core inside a blue vein.
-//!
-//! Windows arrive as `hg_frame` rects; this component tracks previous rects to
-//! derive each window's velocity. There is no particle simulation.
+//! The Shadertoy input textures are synthesised: smooth value noise for Buffer
+//! A's seed and white noise for Buffer C's random rotation (both deterministic),
+//! and a 1x1 zero for the keyboard texture, so the "reset" branch never fires.
 
 const std = @import("std");
 
 const hg = @import("hg.zig");
 const hg_gl = @import("hg_gl.zig");
+const shaders = @import("shaders.zig");
 
 const c = hg.c;
 const gl = hg.gl;
@@ -43,375 +37,285 @@ const log = std.log.scoped(.acrylic);
 
 const max_windows = 32;
 
-/// Velocity is stored in px/s in a half-float target; this is only the display
-/// full-brightness reference.
-const display_scale: f32 = 400.0;
+/// Every uniform the passes share. One cached-location table serves all of
+/// them: `Uniforms.use` re-resolves when the program changes.
+const U = hg.Uniforms(.{
+    .res = "iResolution",
+    .time = "iTime",
+    .frame = "iFrame",
+    .mouse = "iMouse",
+    .ch0 = "uCh0",
+    .ch1 = "uCh1",
+    .ch2 = "uCh2",
+    .ch3 = "uCh3",
+    .res0 = "uRes0",
+    .res1 = "uRes1",
+    .win_count = "uWinCount",
+    .win_rect = "uWin[0]",
+    .win_vel = "uWinVel[0]",
+    .win_scale = "uWinScale",
+    .win_band = "uWinBand",
+    .win_corner = "uWinCorner",
+    .win_slip = "uWinNoSlip",
+    .win_push = "uWinPush",
+    .win_turn = "uWinTurn",
+    .win_curl = "uWinCurl",
+    .win_wall = "uWinWall",
+});
 
-/// The flow pass: self-advect, then add windows, ambient curl noise, vorticity
-/// confinement, momentum and viscosity.
-const flow_frag_src: [:0]const u8 =
-    \\#version 300 es
-    \\precision highp float;
-    \\uniform sampler2D uPrev;
-    \\uniform vec2 uRes;
-    \\uniform vec2 uOut;        // output resolution, for advection in uv
-    \\uniform float uDt;        // seconds
-    \\uniform float uTime;
-    \\uniform vec2 uMomentum;   // px/s, already integrated
-    \\uniform float uVisc;      // 1/s decay
-    \\uniform float uForce;     // boundary drag rate, 1/s
-    \\uniform float uWinPush;   // px/s2, pushes flow out of a window
-    \\uniform float uAmbient;   // curl-noise force strength
-    \\uniform float uVort;      // vorticity confinement strength
-    \\uniform int uSources;     // a few broad vortices just off-screen
-    \\uniform float uSource;    // their strength
-    \\uniform vec2 uAspect;
-    \\uniform int uWinCount;
-    \\uniform vec4 uWin[32];    // uv rect: lo.xy, size.zw
-    \\uniform vec2 uWinVel[32]; // px/s
-    \\out vec4 fragColor;
-    \\
-    \\float hash21(vec2 p) {
-    \\    p = fract(p * vec2(234.34, 435.345));
-    \\    p += dot(p, p + 34.23);
-    \\    return fract(p.x * p.y);
-    \\}
-    \\float vnoise(vec2 p) {
-    \\    vec2 i = floor(p);
-    \\    vec2 f = fract(p);
-    \\    vec2 u = f * f * (3.0 - 2.0 * f);
-    \\    float a = hash21(i);
-    \\    float b = hash21(i + vec2(1.0, 0.0));
-    \\    float c = hash21(i + vec2(0.0, 1.0));
-    \\    float d = hash21(i + vec2(1.0, 1.0));
-    \\    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-    \\}
-    \\float fbm(vec2 p) {
-    \\    float v = 0.0;
-    \\    float a = 0.55;
-    \\    for (int i = 0; i < 3; i++) {
-    \\        v += a * vnoise(p);
-    \\        p = mat2(1.6, 1.2, -1.2, 1.6) * p;
-    \\        a *= 0.55;
-    \\    }
-    \\    return v;
-    \\}
-    \\
-    \\// A divergence-free ambient swirl: the curl of a slowly drifting noise
-    \\// potential, so the whole surface flows in varied directions.
-    \\vec2 ambientForce(vec2 uv) {
-    \\    vec2 q = uv * uAspect * 3.0;
-    \\    float t = uTime * 0.06;
-    \\    float e = 0.14;
-    \\    float dx = fbm(q + vec2(e, 0.0) + vec2(t, -t * 0.7)) - fbm(q - vec2(e, 0.0) + vec2(t, -t * 0.7));
-    \\    float dy = fbm(q + vec2(0.0, e) + vec2(t, -t * 0.7)) - fbm(q - vec2(0.0, e) + vec2(t, -t * 0.7));
-    \\    return vec2(dy, -dx) / (2.0 * e);
-    \\}
-    \\
-    \\float curlAt(vec2 uv) {
-    \\    vec2 e = 1.0 / uRes;
-    \\    float dvdx = texture(uPrev, uv + vec2(e.x, 0.0)).y - texture(uPrev, uv - vec2(e.x, 0.0)).y;
-    \\    float dudy = texture(uPrev, uv + vec2(0.0, e.y)).x - texture(uPrev, uv - vec2(0.0, e.y)).x;
-    \\    return dvdx / (2.0 * e.x) - dudy / (2.0 * e.y);
-    \\}
-    \\
-    \\void main() {
-    \\    vec2 uv = gl_FragCoord.xy / uRes;
-    \\    vec2 vel = texture(uPrev, uv).xy;
-    \\
-    \\    // Semi-Lagrangian self-advection: look back along the flow.
-    \\    vec2 back = uv - vel * uDt / uOut;
-    \\    vel = texture(uPrev, back).xy;
-    \\
-    \\    // Ambient curl noise: a whole-surface swirl so the pool is never static.
-    \\    vel += ambientForce(uv) * (uAmbient * 900.0) * uDt;
-    \\
-    \\    // A handful of broad vortices just outside the screen. They sit at
-    \\    // different angles and alternate rotation, and each also pushes a
-    \\    // little inward, so streams enter from different directions and meet.
-    \\    for (int i = 0; i < uSources; i++) {
-    \\        float fi = float(i);
-    \\        float count = max(float(uSources), 1.0);
-    \\        float a = (fi + 0.5) / count * 6.28318 + uTime * 0.02;
-    \\        float var = fract(sin(fi * 12.9898) * 43758.5453);
-    \\        vec2 c = 0.5 + vec2(cos(a), sin(a)) * uAspect * (1.06 + 0.22 * var);
-    \\        vec2 d = (uv - c) * uAspect;
-    \\        float r2 = dot(d, d);
-    \\        float f = exp(-r2 * 4.0);
-    \\        float sgn = mod(fi, 2.0) < 0.5 ? 1.0 : -1.0;
-    \\        vec2 perp = vec2(-d.y, d.x) / (sqrt(r2) + 0.08);
-    \\        vec2 dir = normalize(-d);
-    \\        float str = uSource * (0.6 + 0.8 * var);
-    \\        vel += (perp * sgn + dir * 0.55) * str * uDt * f;
-    \\    }
-    \\
-    \\    // Vorticity confinement: sharpen the curl into eddies that outlive it.
-    \\    {
-    \\        vec2 e = 1.0 / uRes;
-    \\        float c0 = curlAt(uv);
-    \\        float cx = curlAt(uv + vec2(e.x, 0.0)) - curlAt(uv - vec2(e.x, 0.0));
-    \\        float cy = curlAt(uv + vec2(0.0, e.y)) - curlAt(uv - vec2(0.0, e.y));
-    \\        vec2 n = vec2(cx, cy);
-    \\        float nl = length(n);
-    \\        if (nl > 1.0e-4) n /= nl;
-    \\        vel += vec2(n.y, -n.x) * c0 * uVort * uDt;
-    \\    }
-    \\
-    \\    // Global drift and viscosity.
-    \\    vel += uMomentum * uDt;
-    \\    vel *= exp(-uVisc * uDt);
-    \\
-    \\    // Windows: rigid bodies. Flow cannot pass through a window: the
-    \\    // interior is bled to a stop and nudged out along its shortest way
-    \\    // out, so paint leaves the frame instead of piling up. A soft band
-    \\    // just outside follows the frame, so the surrounding paint stretches
-    \\    // with a moving window (blended, never flung).
-    \\    for (int i = 0; i < uWinCount; i++) {
-    \\        vec4 w = uWin[i];
-    \\        vec2 lo = w.xy;
-    \\        vec2 hi = w.xy + w.zw;
-    \\        float inside = step(lo.x, uv.x) * step(uv.x, hi.x) *
-    \\                       step(lo.y, uv.y) * step(uv.y, hi.y);
-    \\
-    \\        // Shortest way out of the rect, so the interior empties cleanly.
-    \\        vec2 dl = uv - lo;
-    \\        vec2 dh = hi - uv;
-    \\        vec2 outward = vec2(0.0, 1.0);
-    \\        float m = min(min(dl.x, dh.x), min(dl.y, dh.y));
-    \\        if (m == dl.x) outward = vec2(-1.0, 0.0);
-    \\        else if (m == dh.x) outward = vec2(1.0, 0.0);
-    \\        else if (m == dl.y) outward = vec2(0.0, -1.0);
-    \\        vel *= (1.0 - inside);
-    \\        vel += outward * uWinPush * uDt * inside;
-    \\
-    \\        vec2 d = max(lo - uv, uv - hi);
-    \\        float outside = max(max(d.x, d.y), 0.0);
-    \\        float band = (1.0 - inside) * exp(-outside * 12.0);
-    \\        vel = mix(vel, uWinVel[i], clamp(uForce * uDt * band, 0.0, 1.0));
-    \\    }
-    \\
-    \\    fragColor = vec4(vel, 0.0, 1.0);
-    \\}
-;
-
-/// Warp pass: advects a 2D **displacement** `d` (RG) of a material coordinate.
-/// `d` is not paint: the display samples the procedural bands at `uv + d`, so
-/// the pattern is *carried by the flow* — it stretches and travels with the
-/// stream instead of being re-derived from the current direction each frame.
-/// A window displaces `d` locally and the deformation persists, while the rest
-/// of the surface keeps its form. `d` decays toward zero so it stays bounded.
-const dye_frag_src: [:0]const u8 =
-    \\#version 300 es
-    \\precision highp float;
-    \\uniform sampler2D uVel;
-    \\uniform sampler2D uPrev;
-    \\uniform vec2 uRes;
-    \\uniform vec2 uOut;
-    \\uniform float uDt;
-    \\uniform float uTime;
-    \\uniform float uRelax;
-    \\uniform vec2 uAspect;
-    \\out vec4 fragColor;
-    \\
-    \\void main() {
-    \\    vec2 uv = gl_FragCoord.xy / uRes;
-    \\    vec2 vel = texture(uVel, uv).xy;
-    \\
-    \\    // Carry the material coordinate: the point that was at `back` has
-    \\    // moved to `uv`, so its displacement grows by (uv - back).
-    \\    vec2 back = uv - vel * uDt / uOut;
-    \\    vec2 d = texture(uPrev, clamp(back, 0.0, 1.0)).rg + (uv - back);
-    \\
-    \\    // Bleed the displacement so the coordinate stays anchored to the screen
-    \\    // and cannot drift or smear without bound.
-    \\    d *= exp(-uRelax * uDt);
-    \\
-    \\    fragColor = vec4(d, 0.0, 1.0);
-    \\}
-;
+const Tracked = struct {
+    addr: u64 = 0,
+    cx: f32 = 0,
+    cy: f32 = 0,
+    /// Exponentially smoothed centre velocity (px/s). The push uses this so a
+    /// moving window shoves the flow with a little inertia instead of an
+    /// instantaneous jolt.
+    svx: f32 = 0,
+    svy: f32 = 0,
+};
 
 const State = struct {
     width: f32,
     height: f32,
-    sim_w: i32,
-    sim_h: i32,
-    dye_w: i32,
-    dye_h: i32,
+    buf_w: i32,
+    buf_h: i32,
+    /// Buffer resolution relative to the surface. 0.8 renders the grid at
+    /// four-fifths, making every flow structure a little larger on screen.
+    scale: f32,
 
-    /// Ping-pong velocity field (RG = velocity px/s).
-    vel: [2]hg_gl.Target = .{ .{}, .{} },
-    cur: u1 = 0,
-    /// Ping-pong warp field: a single advected phase in R.
-    dye: [2]hg_gl.Target = .{ .{}, .{} },
-    dye_cur: u1 = 0,
-    flow_prog: hg_gl.Program = .{},
-    dye_prog: hg_gl.Program = .{},
+    // Four ping-pong pairs, one per Shadertoy buffer.
+    a: [2]hg_gl.Target = .{ .{}, .{} },
+    a_cur: u1 = 0,
+    b: [2]hg_gl.Target = .{ .{}, .{} },
+    b_cur: u1 = 0,
+    c: [2]hg_gl.Target = .{ .{}, .{} },
+    c_cur: u1 = 0,
+    d: [2]hg_gl.Target = .{ .{}, .{} },
+    d_cur: u1 = 0,
+
+    prog_a: hg_gl.Program = .{},
+    prog_b: hg_gl.Program = .{},
+    prog_c: hg_gl.Program = .{},
+    prog_d: hg_gl.Program = .{},
+
+    tex_noise_a: gl.GLuint = 0,
+    tex_noise_c: gl.GLuint = 0,
+    tex_key: gl.GLuint = 0,
+    noise_a_res: [2]f32 = .{ 1, 1 },
+    noise_c_res: [2]f32 = .{ 1, 1 },
+
+    // Window rigid bodies, in buffer pixels (already multiplied by `scale`).
+    win_count: i32 = 0,
+    win_rect: [max_windows][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** max_windows,
+    win_vel: [max_windows][2]f32 = [_][2]f32{.{ 0, 0 }} ** max_windows,
+    win_band: f32 = 10.0, // surface px
+    win_corner: f32 = 14.0, // surface px
+    win_speed: f32 = 700.0, // surface px/s that maps to a field value of 1
+    win_slip: f32 = 0.0, // 0..1
+    win_push: f32 = 1.0, // 0..1 interior clearing (no flow under a window)
+    win_turn: f32 = 0.85, // 0..1 inflow bent along the edge
+    win_curl: f32 = 0.25, // 0..1 swirl added to the slide
+    win_wall: f32 = 0.6, // 0..1 push ahead of a moving window bounds
+    tracked: [max_windows]Tracked = [_]Tracked{.{}} ** max_windows,
+    tracked_count: usize = 0,
+
+    u: U = .{},
+    frame: i32 = 0,
+    time: f32 = 0,
+    cursor: [2]f32 = .{ 0, 0 },
+
     gl_ready: bool = false,
     gl_failed: bool = false,
-
-    viscosity: f32 = 1.5,
-    momentum: f32 = 0.05,
-    force: f32 = 8.0,
-    push: f32 = 600.0,
-    ambient: f32 = 0.02,
-    /// Single-scale confinement is grid-sensitive: keep it subtle until the
-    /// multiscale version (flow-ref2) lands.
-    vorticity: f32 = 0.02,
-    sources: u32 = 4,
-    source: f32 = 450.0,
-    warp_relax: f32 = 0.15,
-
-    // Global current: velocity and its phase (second-order so it overshoots).
-    cur_vel: [2]f32 = .{ 0, 0 },
-    cur_phase: [2]f32 = .{ 0, 0 },
-
-    // Window rects (uv) and velocities (px/s), snapshotted for upload.
-    win_count: usize = 0,
-    win_rect: [max_windows][4]f32 = undefined,
-    win_vel: [max_windows][2]f32 = undefined,
-
-    prev_addr: [max_windows]u64 = [_]u64{0} ** max_windows,
-    prev_rect: [max_windows][4]f32 = undefined,
-    prev_count: usize = 0,
-
-    now: f64 = 0,
-    last_dt: f32 = 0,
-
-    pu: hg.Uniforms(.{
-        .prev = "uPrev",
-        .res = "uRes",
-        .out = "uOut",
-        .dt = "uDt",
-        .time = "uTime",
-        .momentum = "uMomentum",
-        .visc = "uVisc",
-        .force = "uForce",
-        .push = "uWinPush",
-        .ambient = "uAmbient",
-        .vort = "uVort",
-        .sources = "uSources",
-        .source = "uSource",
-        .aspect = "uAspect",
-        .count = "uWinCount",
-        .win = "uWin[0]",
-        .winvel = "uWinVel[0]",
-    }) = .{},
-    yu: hg.Uniforms(.{
-        .vel = "uVel",
-        .prev = "uPrev",
-        .res = "uRes",
-        .out = "uOut",
-        .dt = "uDt",
-        .time = "uTime",
-        .relax = "uRelax",
-        .aspect = "uAspect",
-    }) = .{},
-    du: hg.Uniforms(.{
-        .vel = "iAcrFlowTex",
-        .dye = "iAcrDyeTex",
-        .active = "iAcrActive",
-        .scale = "iAcrFlowScale",
-    }) = .{},
 };
 
 fn create(host: [*c]const c.hg_host, width: f32, height: f32) callconv(.c) ?*anyopaque {
     const hp = hg.Host{ .raw = @ptrCast(host) };
-
     const state = hg.allocator.create(State) catch return null;
 
-    // A quarter-resolution field is plenty for a smooth velocity map and keeps
-    // the pass cheap at 4K.
-    const scale = std.math.clamp(hp.getFloat("scale", 0.25), 0.1, 1.0);
-    const sim_w: i32 = @intFromFloat(@max(32.0, @round(width * scale)));
-    const sim_h: i32 = @intFromFloat(@max(32.0, @round(height * scale)));
-    // Paint wants more detail than the velocity, so it runs at half the output
-    // unless the user asks for less.
-    const dscale = std.math.clamp(hp.getFloat("warp_scale", 0.75), scale, 1.0);
-    const dye_w: i32 = @intFromFloat(@max(64.0, @round(width * dscale)));
-    const dye_h: i32 = @intFromFloat(@max(64.0, @round(height * dscale)));
+    // 0.8: buffers at four-fifths resolution, so each texel covers 1.25
+    // output pixels and the honey's structures read a little larger.
+    const scale = std.math.clamp(hp.getFloat("scale", 0.8), 0.1, 1.0);
+    const buf_w: i32 = @intFromFloat(@max(16.0, @round(width * scale)));
+    const buf_h: i32 = @intFromFloat(@max(16.0, @round(height * scale)));
 
     state.* = .{
         .width = width,
         .height = height,
-        .sim_w = sim_w,
-        .sim_h = sim_h,
-        .dye_w = dye_w,
-        .dye_h = dye_h,
-        .viscosity = std.math.clamp(hp.getFloat("viscosity", 1.5), 0.0, 8.0),
-        .momentum = std.math.clamp(hp.getFloat("momentum", 0.05), 0.0, 3.0),
-        .force = std.math.clamp(hp.getFloat("force", 8.0), 0.0, 40.0),
-        .push = std.math.clamp(hp.getFloat("push", 600.0), 0.0, 6000.0),
-        .ambient = std.math.clamp(hp.getFloat("ambient", 0.02), 0.0, 4.0),
-        .vorticity = std.math.clamp(hp.getFloat("vorticity", 0.02), 0.0, 0.2),
-        .sources = @intCast(std.math.clamp(hp.getInt("sources", 4), 0, 8)),
-        .source = std.math.clamp(hp.getFloat("source", 450.0), 0.0, 2000.0),
-        .warp_relax = std.math.clamp(hp.getFloat("warp_relax", 0.15), 0.02, 8.0),
+        .buf_w = buf_w,
+        .buf_h = buf_h,
+        .scale = scale,
+        .win_band = @max(hp.getFloat("win_band", 10.0), 0.0),
+        .win_corner = @max(hp.getFloat("win_corner", 14.0), 0.0),
+        .win_speed = @max(hp.getFloat("win_speed", 700.0), 1.0),
+        .win_slip = std.math.clamp(hp.getFloat("win_slip", 0.0), 0.0, 1.0),
+        .win_push = std.math.clamp(hp.getFloat("win_push", 1.0), 0.0, 1.0),
+        .win_turn = std.math.clamp(hp.getFloat("win_turn", 0.85), 0.0, 1.0),
+        .win_curl = std.math.clamp(hp.getFloat("win_curl", 0.25), 0.0, 1.0),
+        .win_wall = std.math.clamp(hp.getFloat("win_wall", 0.6), 0.0, 1.0),
     };
     return @ptrCast(state);
-}
-
-/// Add `dt` to the second-order current and return the new velocity. Kept
-/// second-order (a phase plus a velocity) so the drift can overshoot its
-/// rotating target and gently reverse, as the liquid model asks.
-fn stepCurrent(s: *State, dt: f32) void {
-    const k: f32 = 0.30; // spring, 1/s²
-    const damp: f32 = 0.42; // 1/s, under-damped
-    const amp: f32 = 600.0 * s.momentum;
-    const turn: f32 = 0.22; // rad/s
-    const t: f32 = @floatCast(s.now);
-    const target = [2]f32{ amp * @cos(t * turn), amp * @sin(t * turn) };
-    const ax = (target[0] - s.cur_phase[0]) * k - s.cur_vel[0] * damp;
-    const ay = (target[1] - s.cur_phase[1]) * k - s.cur_vel[1] * damp;
-    s.cur_vel[0] += ax * dt;
-    s.cur_vel[1] += ay * dt;
-    s.cur_phase[0] += s.cur_vel[0] * dt;
-    s.cur_phase[1] += s.cur_vel[1] * dt;
 }
 
 fn update(handle: ?*anyopaque, frame: [*c]const c.hg_frame) callconv(.c) void {
     const self = handle orelse return;
     const s: *State = @ptrCast(@alignCast(self));
     const f: *const c.hg_frame = @ptrCast(frame);
+    s.time = @floatCast(f.time);
+    s.cursor = .{ f.cursor[0], f.cursor[1] };
 
-    const dt = std.math.clamp(f.dt, 0.0, 0.05);
-    s.now += dt;
-    s.last_dt = dt;
+    // Per-window velocity from the centre delta: the host only tracks the
+    // focused window, and a rigid body needs its own motion to drag the flow.
+    const n: usize = @min(@as(usize, f.windows_len), max_windows);
+    const dt = @max(f.dt, 1e-4);
+    var next: [max_windows]Tracked = undefined;
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const r = f.windows[i];
+        if (r.w < 1.0 or r.h < 1.0) continue;
+        const cx = r.x + r.w * 0.5;
+        const cy = r.y + r.h * 0.5;
 
-    stepCurrent(s, dt);
-
-    const n: usize = @intCast(@min(f.windows_len, max_windows));
-    for (0..n) |i| {
-        const w = f.windows[i];
-        const to = [4]f32{ w.x, w.y, w.w, w.h };
-        var from = to;
-        var known = false;
-        for (s.prev_addr[0..s.prev_count], s.prev_rect[0..s.prev_count]) |a, r| {
-            if (a == w.address and a != 0) {
-                from = r;
-                known = true;
+        var vx: f32 = 0;
+        var vy: f32 = 0;
+        var svx: f32 = 0;
+        var svy: f32 = 0;
+        for (s.tracked[0..s.tracked_count]) |p| {
+            if (p.addr != 0 and p.addr == r.address) {
+                vx = (cx - p.cx) / dt;
+                vy = (cy - p.cy) / dt;
+                svx = p.svx;
+                svy = p.svy;
                 break;
             }
         }
-        // Rect in uv, snapped to the field grid edges.
-        s.win_rect[i] = .{
-            w.x / s.width,
-            w.y / s.height,
-            w.w / s.width,
-            w.h / s.height,
-        };
-        if (known and dt > 0) {
-            const cx = (to[0] + to[2] * 0.5) - (from[0] + from[2] * 0.5);
-            const cy = (to[1] + to[3] * 0.5) - (from[1] + from[3] * 0.5);
-            s.win_vel[i] = .{ cx / dt, cy / dt };
-        } else {
-            s.win_vel[i] = .{ 0, 0 };
-        }
+        vx = std.math.clamp(vx, -6000.0, 6000.0);
+        vy = std.math.clamp(vy, -6000.0, 6000.0);
+        // Inertia: follow the instantaneous velocity with a ~0.15 s time
+        // constant, so the push ramps in and fades out instead of snapping.
+        const k: f32 = 1.0 - @exp(-dt / 0.15);
+        svx += (vx - svx) * k;
+        svy += (vy - svy) * k;
 
-        s.prev_addr[i] = w.address;
-        s.prev_rect[i] = to;
+        s.win_rect[count] = .{ r.x * s.scale, r.y * s.scale, r.w * s.scale, r.h * s.scale };
+        s.win_vel[count] = .{ svx * s.scale, svy * s.scale };
+        next[count] = .{ .addr = r.address, .cx = cx, .cy = cy, .svx = svx, .svy = svy };
+        count += 1;
     }
-    s.prev_count = n;
-    s.win_count = n;
+    s.win_count = @intCast(count);
+    s.tracked = next;
+    s.tracked_count = count;
+}
+
+fn bindTex(unit: gl.GLenum, tex: gl.GLuint) void {
+    gl.glActiveTexture(unit);
+    gl.glBindTexture(gl.GL_TEXTURE_2D, tex);
+}
+
+fn makeTexture(w: u32, h: u32, rgba: []const u8) gl.GLuint {
+    var tex: gl.GLuint = 0;
+    gl.glGenTextures(1, &tex);
+    gl.glBindTexture(gl.GL_TEXTURE_2D, tex);
+    gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1);
+    gl.glTexImage2D(
+        gl.GL_TEXTURE_2D,
+        0,
+        gl.GL_RGBA8,
+        @intCast(w),
+        @intCast(h),
+        0,
+        gl.GL_RGBA,
+        gl.GL_UNSIGNED_BYTE,
+        rgba.ptr,
+    );
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR_MIPMAP_LINEAR);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_REPEAT);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_REPEAT);
+    gl.glGenerateMipmap(gl.GL_TEXTURE_2D);
+    gl.glBindTexture(gl.GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+fn hash2(x: i32, y: i32, seed: u32) f32 {
+    var hsh: u32 = @as(u32, @bitCast(x)) *% 374761393 +%
+        @as(u32, @bitCast(y)) *% 668265263 +% seed *% 2246822519;
+    hsh = (hsh ^ (hsh >> 13)) *% 1274126177;
+    hsh ^= hsh >> 16;
+    return @as(f32, @floatFromInt((hsh >> 8) & 0xffff)) / 65535.0;
+}
+
+fn smooth(t: f32) f32 {
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn valueNoise(x: f32, y: f32, seed: u32) f32 {
+    const xi = @floor(x);
+    const yi = @floor(y);
+    const u = smooth(x - xi);
+    const v = smooth(y - yi);
+    const ix: i32 = @intFromFloat(xi);
+    const iy: i32 = @intFromFloat(yi);
+    const a = hash2(ix, iy, seed);
+    const b = hash2(ix + 1, iy, seed);
+    const cc = hash2(ix, iy + 1, seed);
+    const d = hash2(ix + 1, iy + 1, seed);
+    return (a * (1.0 - u) + b * u) * (1.0 - v) + (cc * (1.0 - u) + d * u) * v;
+}
+
+fn fbm(x: f32, y: f32, seed: u32) f32 {
+    var f: f32 = 0;
+    var amp: f32 = 0.5;
+    var freq: f32 = 1.0;
+    var s = seed;
+    for (0..4) |_| {
+        f += amp * valueNoise(x * freq, y * freq, s);
+        freq *= 2.0;
+        amp *= 0.5;
+        s +%= 0x9e3779b9;
+    }
+    return f;
+}
+
+/// Smooth multi-octave noise: Buffer A seeds from this, so coherent blobs
+/// form instead of a per-pixel salt-and-pepper field.
+fn smoothNoise(alloc: std.mem.Allocator, w: u32, h: u32) []u8 {
+    const out = alloc.alloc(u8, @as(usize, w) * h * 4) catch return &.{};
+    for (0..h) |y| {
+        for (0..w) |x| {
+            const i = (y * w + x) * 4;
+            const fx: f32 = @floatFromInt(x);
+            const fy: f32 = @floatFromInt(y);
+            out[i + 0] = @intFromFloat(std.math.clamp(fbm(fx / 28.0, fy / 28.0, 1), 0, 1) * 255);
+            out[i + 1] = @intFromFloat(std.math.clamp(fbm(fx / 28.0, fy / 28.0, 2), 0, 1) * 255);
+            out[i + 2] = @intFromFloat(std.math.clamp(fbm(fx / 28.0, fy / 28.0, 3), 0, 1) * 255);
+            out[i + 3] = 255;
+        }
+    }
+    return out;
+}
+
+/// White noise: Buffer C steps a random rotation each frame, so it wants
+/// uncorrelated values rather than coherent structure.
+fn whiteNoise(alloc: std.mem.Allocator, w: u32, h: u32) []u8 {
+    const out = alloc.alloc(u8, @as(usize, w) * h * 4) catch return &.{};
+    for (0..h) |y| {
+        for (0..w) |x| {
+            const i = (y * w + x) * 4;
+            out[i + 0] = @intFromFloat(hash2(@intCast(x), @intCast(y), 11) * 255);
+            out[i + 1] = @intFromFloat(hash2(@intCast(x), @intCast(y), 29) * 255);
+            out[i + 2] = @intFromFloat(hash2(@intCast(x), @intCast(y), 47) * 255);
+            out[i + 3] = 255;
+        }
+    }
+    return out;
+}
+
+fn noiseTexture(alloc: std.mem.Allocator, w: u32, h: u32, smooth_field: bool) gl.GLuint {
+    const buf = if (smooth_field) smoothNoise(alloc, w, h) else whiteNoise(alloc, w, h);
+    defer if (buf.len > 0) alloc.free(buf);
+    if (buf.len == 0) return 0;
+    return makeTexture(w, h, buf);
 }
 
 fn ensureGl(s: *State) bool {
@@ -419,45 +323,79 @@ fn ensureGl(s: *State) bool {
     if (s.gl_failed) return false;
     s.gl_failed = true;
 
-    s.flow_prog = hg_gl.Program.init(flow_frag_src) catch {
-        log.err("flow program failed", .{});
+    s.prog_a = hg_gl.Program.init(shaders.pass_a) catch {
+        log.err("buffer-a program failed", .{});
         return false;
     };
-    s.dye_prog = hg_gl.Program.init(dye_frag_src) catch {
-        log.err("warp program failed", .{});
+    s.prog_b = hg_gl.Program.init(shaders.pass_b) catch {
+        log.err("buffer-b program failed", .{});
         return false;
     };
-    for (&s.vel) |*tg| {
-        tg.* = hg_gl.Target.init(s.sim_w, s.sim_h, .{
-            .format = .rgba16f,
-            .half_float_fallback = true,
-            .filter = .linear,
-            .wrap = .clamp,
-        }) catch return false;
-    }
-    for (&s.dye) |*tg| {
-        tg.* = hg_gl.Target.init(s.dye_w, s.dye_h, .{
-            .format = .rgba16f,
-            .half_float_fallback = true,
-            .filter = .linear,
-            .wrap = .clamp,
-        }) catch return false;
-    }
-    for (&s.vel) |*tg| {
-        tg.begin();
-        gl.glClearColor(0, 0, 0, 1);
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT);
-    }
-    for (&s.dye) |*tg| {
-        tg.begin();
-        gl.glClearColor(0, 0, 0, 0);
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT);
-    }
+    s.prog_c = hg_gl.Program.init(shaders.pass_c) catch {
+        log.err("buffer-c program failed", .{});
+        return false;
+    };
+    s.prog_d = hg_gl.Program.init(shaders.pass_d) catch {
+        log.err("buffer-d program failed", .{});
+        return false;
+    };
+
+    const opts = hg_gl.Target.Options{
+        .format = .rgba16f,
+        .half_float_fallback = true,
+        .filter = .linear,
+        .wrap = .clamp,
+    };
+    for (&s.a) |*t| t.* = hg_gl.Target.init(s.buf_w, s.buf_h, opts) catch return false;
+    for (&s.b) |*t| t.* = hg_gl.Target.init(s.buf_w, s.buf_h, opts) catch return false;
+    for (&s.c) |*t| t.* = hg_gl.Target.init(s.buf_w, s.buf_h, opts) catch return false;
+    for (&s.d) |*t| t.* = hg_gl.Target.init(s.buf_w, s.buf_h, opts) catch return false;
+
+    for (&s.a) |*t| clear(t);
+    for (&s.b) |*t| clear(t);
+    for (&s.c) |*t| clear(t);
+    for (&s.d) |*t| clear(t);
     gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
+
+    const w: u32 = 256;
+    const h: u32 = 256;
+    s.tex_noise_a = noiseTexture(hg.allocator, w, h, true);
+    s.tex_noise_c = noiseTexture(hg.allocator, w, h, false);
+    s.noise_a_res = .{ @floatFromInt(w), @floatFromInt(h) };
+    s.noise_c_res = s.noise_a_res;
+
+    // 1x1 zero: Buffer A's keyboard texture (reset never fires) and the
+    // placeholder for every channel the port no longer samples.
+    const zero = [_]u8{ 0, 0, 0, 0 };
+    s.tex_key = makeTexture(1, 1, &zero);
+
+    gl.glActiveTexture(gl.GL_TEXTURE0);
 
     s.gl_failed = false;
     s.gl_ready = true;
     return true;
+}
+
+fn clear(t: *const hg_gl.Target) void {
+    t.begin();
+    gl.glClearColor(0, 0, 0, 0);
+    gl.glClear(gl.GL_COLOR_BUFFER_BIT);
+}
+
+fn setWindows(s: *State, u: *U, speed: f32) void {
+    u.int(.win_count, s.win_count);
+    if (s.win_count > 0) {
+        u.f4v(.win_rect, s.win_count, &s.win_rect);
+        u.f2v(.win_vel, s.win_count, &s.win_vel);
+    }
+    u.f1(.win_scale, speed * s.scale);
+    u.f1(.win_band, s.win_band * s.scale);
+    u.f1(.win_corner, s.win_corner * s.scale);
+    u.f1(.win_slip, s.win_slip);
+    u.f1(.win_push, s.win_push);
+    u.f1(.win_turn, s.win_turn);
+    u.f1(.win_curl, s.win_curl);
+    u.f1(.win_wall, s.win_wall);
 }
 
 fn upload(handle: ?*anyopaque, program: u32) callconv(.c) void {
@@ -465,73 +403,118 @@ fn upload(handle: ?*anyopaque, program: u32) callconv(.c) void {
     const s: *State = @ptrCast(@alignCast(self));
     if (!ensureGl(s)) return;
 
-    const prev = s.cur;
-    const next = 1 - prev;
+    const bw: f32 = @floatFromInt(s.buf_w);
+    const bh: f32 = @floatFromInt(s.buf_h);
+    const zero = s.tex_key;
 
-    s.vel[next].begin();
-    s.pu.use(s.flow_prog.program);
-    s.vel[prev].bindTexture(gl.GL_TEXTURE0);
-    s.pu.int(.prev, 0);
-    s.pu.f2(.res, @floatFromInt(s.sim_w), @floatFromInt(s.sim_h));
-    s.pu.f2(.out, s.width, s.height);
-    s.pu.f1(.dt, s.last_dt);
-    s.pu.f1(.time, @floatCast(@mod(s.now, 3600.0)));
-    s.pu.f2(.momentum, s.cur_vel[0], s.cur_vel[1]);
-    s.pu.f1(.visc, s.viscosity);
-    s.pu.f1(.force, s.force);
-    s.pu.f1(.push, s.push);
-    s.pu.f1(.ambient, s.ambient);
-    s.pu.f1(.vort, s.vorticity);
-    s.pu.int(.sources, @intCast(s.sources));
-    s.pu.f1(.source, s.source);
-    s.pu.f2(.aspect, s.width / s.height, 1.0);
-    s.pu.int(.count, @intCast(s.win_count));
-    if (s.win_count > 0) {
-        s.pu.f4v(.win, @intCast(s.win_count), &s.win_rect[0]);
-        s.pu.f2v(.winvel, @intCast(s.win_count), &s.win_vel[0]);
-    }
-    s.flow_prog.draw();
+    // --- Buffer A: A <- D(prev), noise, keyboard ---------------------------
+    const aw: u1 = 1 - s.a_cur;
+    s.a[aw].begin();
+    s.u.use(s.prog_a.program);
+    bindTex(gl.GL_TEXTURE0, s.d[s.d_cur].tex);
+    s.u.int(.ch0, 0);
+    bindTex(gl.GL_TEXTURE1, s.tex_noise_a);
+    s.u.int(.ch1, 1);
+    bindTex(gl.GL_TEXTURE3, s.tex_key);
+    s.u.int(.ch3, 3);
+    s.u.f3(.res, bw, bh, 1.0);
+    s.u.f1(.time, s.time);
+    s.u.int(.frame, s.frame);
+    s.u.f4(.mouse, s.cursor[0], s.cursor[1], 0.0, 0.0);
+    setWindows(s, &s.u, s.win_speed);
+    s.prog_a.draw();
     gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
-    s.cur = next;
+    s.a_cur = aw;
 
-    // --- warp pass: advect the band phase through the new velocity field ---
-    const dprev = s.dye_cur;
-    const dnext = 1 - dprev;
-    s.dye[dnext].begin();
-    s.yu.use(s.dye_prog.program);
-    s.vel[next].bindTexture(gl.GL_TEXTURE0);
-    s.yu.int(.vel, 0);
-    s.dye[dprev].bindTexture(gl.GL_TEXTURE1);
-    s.yu.int(.prev, 1);
-    s.yu.f2(.res, @floatFromInt(s.dye_w), @floatFromInt(s.dye_h));
-    s.yu.f2(.out, s.width, s.height);
-    s.yu.f1(.dt, s.last_dt);
-    s.yu.f1(.time, @floatCast(@mod(s.now, 3600.0)));
-    s.yu.f1(.relax, s.warp_relax);
-    s.yu.f2(.aspect, s.width / s.height, 1.0);
-    s.dye_prog.draw();
+    // --- Buffer B: B <- A --------------------------------------------------
+    const bnext: u1 = 1 - s.b_cur;
+    s.b[bnext].begin();
+    s.u.use(s.prog_b.program);
+    bindTex(gl.GL_TEXTURE0, s.a[s.a_cur].tex);
+    s.u.int(.ch0, 0);
+    s.u.f3(.res, bw, bh, 1.0);
+    s.u.f1(.time, s.time);
+    s.u.int(.frame, s.frame);
+    s.u.f4(.mouse, s.cursor[0], s.cursor[1], 0.0, 0.0);
+    setWindows(s, &s.u, s.win_speed);
+    s.prog_b.draw();
     gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
-    s.dye_cur = dnext;
+    s.b_cur = bnext;
 
-    s.du.use(program);
-    s.vel[next].bindTexture(gl.GL_TEXTURE0);
-    s.du.int(.vel, 0);
-    s.dye[dnext].bindTexture(gl.GL_TEXTURE1);
-    s.du.int(.dye, 1);
-    s.du.f1(.active, 1.0);
-    s.du.f1(.scale, display_scale);
+    // --- Buffer C: C <- C(prev), noise, colour, B --------------------------
+    const cnext: u1 = 1 - s.c_cur;
+    s.c[cnext].begin();
+    s.u.use(s.prog_c.program);
+    bindTex(gl.GL_TEXTURE0, s.c[s.c_cur].tex);
+    s.u.int(.ch0, 0);
+    bindTex(gl.GL_TEXTURE1, s.tex_noise_c);
+    s.u.int(.ch1, 1);
+    bindTex(gl.GL_TEXTURE2, zero);
+    s.u.int(.ch2, 2);
+    bindTex(gl.GL_TEXTURE3, s.b[s.b_cur].tex);
+    s.u.int(.ch3, 3);
+    s.u.f3(.res, bw, bh, 1.0);
+    s.u.f3(.res0, bw, bh, 1.0);
+    s.u.f3(.res1, s.noise_c_res[0], s.noise_c_res[1], 1.0);
+    s.u.f1(.time, s.time);
+    s.u.int(.frame, s.frame);
+    s.u.f4(.mouse, s.cursor[0], s.cursor[1], 0.0, 0.0);
+    // C's velocity is 0.5-centred in a field of order 0.1; a huge reference
+    // speed makes the body velocity effectively zero, so the obstacle only
+    // freezes and deflects.
+    setWindows(s, &s.u, 1.0e9);
+    s.prog_c.draw();
+    gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
+    s.c_cur = cnext;
+
+    // --- Buffer D: D <- B, colour, C, B ------------------------------------
+    const dnext: u1 = 1 - s.d_cur;
+    s.d[dnext].begin();
+    s.u.use(s.prog_d.program);
+    bindTex(gl.GL_TEXTURE0, s.b[s.b_cur].tex);
+    s.u.int(.ch0, 0);
+    bindTex(gl.GL_TEXTURE1, zero);
+    s.u.int(.ch1, 1);
+    bindTex(gl.GL_TEXTURE2, s.c[s.c_cur].tex);
+    s.u.int(.ch2, 2);
+    bindTex(gl.GL_TEXTURE3, s.b[s.b_cur].tex);
+    s.u.int(.ch3, 3);
+    s.u.f3(.res, bw, bh, 1.0);
+    // D's slow lava-lamp oscillation sets which field feeds A next; run it
+    // slower so the large-scale composition breathes instead of churning.
+    s.u.f1(.time, s.time * 0.10);
+    s.u.int(.frame, s.frame);
+    s.u.f4(.mouse, s.cursor[0], s.cursor[1], 0.0, 0.0);
+    s.prog_d.draw();
+    gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
+    s.d_cur = dnext;
+
+    // --- Image: D, colour, C into the host's display program ---------------
+    s.u.use(program);
+    bindTex(gl.GL_TEXTURE0, s.d[s.d_cur].tex);
+    s.u.int(.ch0, 0);
+    bindTex(gl.GL_TEXTURE2, s.c[s.c_cur].tex);
+    s.u.int(.ch2, 2);
+    s.u.int(.frame, s.frame);
     gl.glActiveTexture(gl.GL_TEXTURE0);
+
+    s.frame += 1;
 }
 
 fn destroy(handle: ?*anyopaque) callconv(.c) void {
     const self = handle orelse return;
     const s: *State = @ptrCast(@alignCast(self));
-    s.vel[0].deinit();
-    s.vel[1].deinit();
-    s.dye[0].deinit();
-    s.dye[1].deinit();
-    s.flow_prog.deinit();
-    s.dye_prog.deinit();
+    for (&s.a) |*t| t.deinit();
+    for (&s.b) |*t| t.deinit();
+    for (&s.c) |*t| t.deinit();
+    for (&s.d) |*t| t.deinit();
+    s.prog_a.deinit();
+    s.prog_b.deinit();
+    s.prog_c.deinit();
+    s.prog_d.deinit();
+    if (s.tex_noise_a != 0) gl.glDeleteTextures(1, &s.tex_noise_a);
+    if (s.tex_noise_c != 0) gl.glDeleteTextures(1, &s.tex_noise_c);
+    if (s.tex_key != 0) gl.glDeleteTextures(1, &s.tex_key);
     hg.allocator.destroy(s);
 }
 

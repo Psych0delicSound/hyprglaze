@@ -1,7 +1,7 @@
 # Visual probe for the acrylic effect: a theme-black particle liquid fills the
 # surface, a minority of the particles are palette-coloured, and moving a
-# window stirs the pool like a leaf dragged across water.
-#
+# Visual probe for the acrylic effect: a mostly-black honey with narrow
+# palette veins, and windows as rigid bodies that push and deflect the flow.
 #   scripts/hypr-harness.sh scripts/acrylic.probe.sh
 #
 # HG_THEME overrides the theme; HG_SHOW=1 to watch it. Produces
