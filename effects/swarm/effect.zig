@@ -489,6 +489,7 @@ const module = c.hg_module{
     .abi_version = hg.abi_version,
     .id = "swarm",
     .shader = "swarm.frag",
+    .config_section = null,
     .wants_audio = 1,
     .create = create,
     .update = update,

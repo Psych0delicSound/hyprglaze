@@ -33,6 +33,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // The shared 2D geometry painter, likewise. `src/effects/geometry.zig`
+    // re-exports this so milkdrop/starfield and their component ports draw
+    // through one implementation.
+    const hg_geometry_mod = b.createModule(.{
+        .root_source_file = b.path("sdk/hg_geometry.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // --- main executable ---
     const exe = b.addExecutable(.{
         .name = "hyprglaze",
@@ -43,6 +52,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "toml", .module = toml_dep.module("toml") },
                 .{ .name = "hg_audio", .module = hg_audio_mod },
+                .{ .name = "hg_geometry", .module = hg_geometry_mod },
             },
         }),
         .use_llvm = llvm_backend,
@@ -139,6 +149,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "toml", .module = toml_dep.module("toml") },
                 .{ .name = "hg_audio", .module = hg_audio_mod },
+                .{ .name = "hg_geometry", .module = hg_geometry_mod },
             },
         }),
         .use_llvm = llvm_backend,

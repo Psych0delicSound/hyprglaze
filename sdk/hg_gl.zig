@@ -7,8 +7,13 @@
 //! `Program` provides exactly that; a module keeps its own extras in an
 //! `hg.Uniforms` keyed off `program`.
 //!
-//! GL is only current during `upload`, so build a `Program` lazily on the first
-//! upload (never in `create`), and `deinit` it in `destroy`.
+//! `Target` covers the other half of an offscreen pass: the colour texture and
+//! its framebuffer, created and freed as one (see its doc). Ping-pong feedback
+//! is two of them.
+//!
+//! GL is only current during `upload`, so build a `Program` (or `Target`)
+//! lazily on the first upload (never in `create`), and `deinit` it in
+//! `destroy`.
 
 const std = @import("std");
 const hg = @import("hg.zig");
@@ -143,6 +148,124 @@ pub const Program = struct {
         if (self.program != 0) gl.glDeleteProgram(self.program);
         self.vao = 0;
         self.program = 0;
+    }
+};
+
+/// Internal colour format for a [`Target`]. `rgba16f` keeps overlapping
+/// additive glows from clipping to white (and lets a slow feedback decay fade
+/// out instead of sticking at the last 8-bit step); `rgba8` is the cheap,
+/// universally supported choice.
+pub const TextureFormat = enum { rgba8, rgba16f };
+
+/// An offscreen render target: a colour texture with its own framebuffer,
+/// created, resized (by re-init) and freed as one. Effects that render an
+/// extra pass and hand the texture to the main shader use this for the parts
+/// that are the same every time; ping-pong feedback is two `Target`s.
+///
+/// Build it lazily in `upload` (GL is only current there), never in `create`,
+/// and `deinit` it in `destroy`.
+pub const Target = struct {
+    fbo: gl.GLuint = 0,
+    tex: gl.GLuint = 0,
+    width: gl.GLsizei = 0,
+    height: gl.GLsizei = 0,
+
+    pub const Filter = enum { nearest, linear };
+    pub const Wrap = enum { clamp, repeat };
+
+    pub const Options = struct {
+        format: TextureFormat = .rgba8,
+        /// Try RGBA16F first and fall back to RGBA8 when the attachment is
+        /// incomplete (some GLES drivers refuse half-float render targets).
+        half_float_fallback: bool = false,
+        filter: Filter = .linear,
+        wrap: Wrap = .clamp,
+        /// Allocate a mip chain (min filter becomes LINEAR_MIPMAP_NEAREST, so
+        /// the texture stays complete for `generateMipmaps`).
+        mipmaps: bool = false,
+    };
+
+    const Format = struct { internal: gl.GLint, data_type: gl.GLenum };
+
+    pub fn init(width_in: i32, height_in: i32, opts: Options) !Target {
+        const w: gl.GLsizei = @intCast(@max(width_in, 1));
+        const h: gl.GLsizei = @intCast(@max(height_in, 1));
+
+        var self = Target{ .width = w, .height = h };
+        gl.glGenTextures(1, &self.tex);
+        if (self.tex == 0) return error.CreateTextureFailed;
+        errdefer gl.glDeleteTextures(1, &self.tex);
+        gl.glGenFramebuffers(1, &self.fbo);
+        if (self.fbo == 0) return error.CreateFramebufferFailed;
+        errdefer gl.glDeleteFramebuffers(1, &self.fbo);
+
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.fbo);
+
+        const eight = Format{ .internal = gl.GL_RGBA8, .data_type = gl.GL_UNSIGNED_BYTE };
+        const half = Format{ .internal = gl.GL_RGBA16F, .data_type = gl.GL_HALF_FLOAT };
+        const candidates: []const Format = switch (opts.format) {
+            .rgba8 => &.{eight},
+            .rgba16f => if (opts.half_float_fallback) &.{ half, eight } else &.{half},
+        };
+
+        const mag: gl.GLint = switch (opts.filter) {
+            .nearest => gl.GL_NEAREST,
+            .linear => gl.GL_LINEAR,
+        };
+        const min: gl.GLint = if (opts.mipmaps) gl.GL_LINEAR_MIPMAP_NEAREST else mag;
+        const wrap: gl.GLint = switch (opts.wrap) {
+            .clamp => gl.GL_CLAMP_TO_EDGE,
+            .repeat => gl.GL_REPEAT,
+        };
+
+        var complete = false;
+        for (candidates) |fmt| {
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.tex);
+            gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, fmt.internal, w, h, 0, gl.GL_RGBA, fmt.data_type, null);
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, min);
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, mag);
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, wrap);
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, wrap);
+            gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, self.tex, 0);
+            complete = gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) == gl.GL_FRAMEBUFFER_COMPLETE;
+            if (complete) break;
+        }
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
+        if (!complete) {
+            log.err("target {d}x{d}: framebuffer incomplete", .{ width_in, height_in });
+            return error.FramebufferIncomplete;
+        }
+        return self;
+    }
+
+    /// Bind this target's framebuffer and set the viewport to its size.
+    pub fn begin(self: *const Target) void {
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.fbo);
+        gl.glViewport(0, 0, self.width, self.height);
+    }
+
+    pub fn bind(self: *const Target) void {
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.fbo);
+    }
+
+    /// Bind the texture to `unit` (does not touch the active unit).
+    pub fn bindTexture(self: *const Target, unit: gl.GLenum) void {
+        gl.glActiveTexture(unit);
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.tex);
+    }
+
+    pub fn generateMipmaps(self: *const Target) void {
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.tex);
+        gl.glGenerateMipmap(gl.GL_TEXTURE_2D);
+    }
+
+    pub fn deinit(self: *Target) void {
+        if (self.fbo != 0) gl.glDeleteFramebuffers(1, &self.fbo);
+        if (self.tex != 0) gl.glDeleteTextures(1, &self.tex);
+        self.fbo = 0;
+        self.tex = 0;
+        self.width = 0;
+        self.height = 0;
     }
 };
 

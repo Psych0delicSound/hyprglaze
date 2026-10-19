@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-#define HG_ABI_VERSION 1
+#define HG_ABI_VERSION 2
 
 /* A window rectangle in surface pixels, plus its Hyprland address. */
 typedef struct hg_rect {
@@ -80,6 +80,13 @@ typedef struct hg_module {
     uint32_t    abi_version;
     const char* id;       /* stable effect name, e.g. "weft"             */
     const char* shader;   /* .frag next to the module, or NULL for default */
+    /*
+     * Config section the host reads this module's params and audio settings
+     * (`music`, `sink`) from. NULL means the module's `id`. Effects that
+     * intentionally share another effect's section (starfield and milkdrop
+     * read the shared [visualizer] knobs) set this to that name.
+     */
+    const char* config_section;
     int         wants_audio; /* nonzero: host fills hg_frame.wave        */
 
     void* (*create)(const hg_host* host, float width, float height);

@@ -15,6 +15,7 @@
 //!         .abi_version = hg.abi_version,
 //!         .id = "my-effect",
 //!         .shader = "my-effect.frag",
+//!         .config_section = null, // use the section named by `id`
 //!         .wants_audio = 0,
 //!         .create = create,
 //!         .update = update,

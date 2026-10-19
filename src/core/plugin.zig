@@ -40,7 +40,7 @@ const sdk_header_path = sdk_include_dir ++ "/hg_plugin.h";
 /// Zig SDK modules staged next to every component source, so `@import("hg.zig")`
 /// (and `hg.audio`) resolve. Kept in the cache key. Add new SDK `.zig` files
 /// here.
-const sdk_modules = [_][]const u8{ "hg.zig", "hg_audio.zig", "hg_gl.zig" };
+const sdk_modules = [_][]const u8{ "hg.zig", "hg_audio.zig", "hg_gl.zig", "hg_geometry.zig" };
 
 /// Arguments after the source path for every component compile, and folded
 /// into the cache key so a change recompiles. `-fstrip` drops debug info and the
@@ -439,6 +439,15 @@ fn paramStr(ctx: ?*anyopaque, key: [*c]const u8, out_len: [*c]u64) callconv(.c) 
 
 // --- instance ----------------------------------------------------------------
 
+/// The config section a loaded module reads its params and audio settings
+/// (`music`, `sink`) from. `config_section` defaults to the effect name; a
+/// module that leaves it NULL or empty uses `id`.
+fn configSection(mod: *const c.hg_module, name: []const u8) []const u8 {
+    const p = mod.config_section orelse return name;
+    const s = std.mem.span(@as([*:0]const u8, @ptrCast(p)));
+    return if (s.len == 0) name else s;
+}
+
 /// One live plugin effect. Held by value in the `Effect` union; the underlying
 /// module and its shared object outlive every instance (process-lifetime cache).
 pub const Instance = struct {
@@ -456,9 +465,14 @@ pub const Instance = struct {
 
         const loaded = try loadModule(effect_name, dir);
 
+        // Params and the audio flags come from the module's config section,
+        // which defaults to the effect name but lets an effect share another
+        // section (starfield/milkdrop read [visualizer]).
+        const section = configSection(loaded.mod, effect_name);
+
         // Host + params are valid for the duration of `create` only; the
         // module caches whatever it needs.
-        var params = config_mod.effectParams(cfg, effect_name);
+        var params = config_mod.effectParams(cfg, section);
         var host = c.hg_host{
             .abi_version = abi_version,
             .params = params_vtbl,
