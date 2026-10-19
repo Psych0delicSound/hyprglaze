@@ -12,8 +12,8 @@
 # the host throttles the nested output to 15fps and the ~66ms frames read
 # as a tracking lag that is not the daemon's.
 
-# "x0 y0 x1 y1" of the foot window (its flat #242424-ish background) and
-# of the red ring, from one grab.
+# "x0 y0 x1 y1" of the probe window (spawn_probe forces its flat #242424
+# background) and of the red ring, from one grab.
 measure() { python3 - "$OUT/shots/$1.png" <<'PY'
 import sys, numpy as np
 from PIL import Image
@@ -33,7 +33,7 @@ print(win[0], win[1], err, ring[0] + 14 - win[0])
 PY
 }
 
-# "mid" while the foot window is between 400x300 and 900x700.
+# "mid" while the probe window is between 400x300 and 900x700.
 garea() { python3 - "$OUT/shots/$1.png" <<'PY'
 import sys, numpy as np
 from PIL import Image
@@ -46,9 +46,7 @@ PY
 
 run_case() {   # TAG [resize]
     local tag=$1 mode=${2:-move} worst=0 n=0 moving=0 line
-    env -u DISPLAY WAYLAND_DISPLAY="$NESTED_WL" HYPRLAND_INSTANCE_SIGNATURE="$NESTED_SIG" \
-        foot --app-id="anim-$tag" >/dev/null 2>&1 &
-    CLIENT_PIDS+=($!)
+    spawn_probe "anim-$tag"
     wait_for "[ \"\$(hcj activewindow | jq -r .class)\" = anim-$tag ]" 10
     E "hl.dispatch(hl.dsp.window.move({ workspace = 11 }))" >/dev/null; sleep 0.5
     E "hl.dispatch(hl.dsp.window.float({ action = 'on' }))" >/dev/null; sleep 1.5

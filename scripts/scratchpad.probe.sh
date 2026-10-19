@@ -40,9 +40,7 @@ E "hl.dispatch(hl.dsp.workspace.toggle_special({ name = 'scratch' }))" >/dev/nul
 sleep 1.5
 lua_dump during-empty
 
-env -u DISPLAY WAYLAND_DISPLAY="$NESTED_WL" HYPRLAND_INSTANCE_SIGNATURE="$NESTED_SIG" \
-    foot --app-id=probe-scratch >/dev/null 2>&1 &
-CLIENT_PIDS+=($!)
+spawn_probe probe-scratch
 sleep 3
 lua_dump during-populated
 

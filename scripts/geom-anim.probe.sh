@@ -10,9 +10,7 @@
 #   scripts/hypr-harness.sh scripts/geom-anim.probe.sh
 
 E "hl.animation({ leaf = 'windows', enabled = true, speed = 10, bezier = 'linear' })" >/dev/null
-env -u DISPLAY WAYLAND_DISPLAY="$NESTED_WL" HYPRLAND_INSTANCE_SIGNATURE="$NESTED_SIG" \
-    foot --app-id=anim-x >/dev/null 2>&1 &
-CLIENT_PIDS+=($!)
+spawn_probe anim-x
 wait_for "hcj clients | jq -e '.[]|select(.class==\"anim-x\")' >/dev/null" 15
 wait_for "[ \"\$(hcj activewindow | jq -r .class)\" = anim-x ]" 10
 E "hl.dispatch(hl.dsp.window.float({ action = 'on' }))" >/dev/null; sleep 1.5

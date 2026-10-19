@@ -23,6 +23,7 @@
 #   start_daemon OUT TAG     launch hyprglaze pinned to an output
 #   start_effect OUT TAG FX [CFG]  launch a real effect pinned to an output
 #   place CLS WS LX LY W H   open a probe window at monitor-local coords
+#   spawn_probe APP_ID       launch a bare probe client (kitty/foot)
 #   shot NAME OUTPUT         grim one output into $OUT/shots/NAME.png
 #   show_harness             show the nested outputs on the host (full fps)
 #   scan FILE COLOUR         "x0 y0 x1 y1 count" or "none"
@@ -76,9 +77,26 @@ LAYOUT=${HG_LAYOUT:-x}
 
 cd "$(dirname "$0")/.." || exit 1
 [ -x "$BIN" ] || { echo "no binary at $BIN — zig build first" >&2; exit 1; }
-for t in Hyprland hyprctl grim jq python3 foot; do
+for t in Hyprland hyprctl grim jq python3; do
     command -v "$t" >/dev/null || { echo "missing $t" >&2; exit 1; }
 done
+
+# Probe client: any Wayland client that lets us choose its app_id is enough to
+# be a "window under test". kitty is preferred (it is what this repo tests
+# against); foot works too. probe_client is resolved here — probe bodies that
+# need a window call spawn_probe, which fails loudly if neither is present, so
+# a probe that places no windows (e.g. glitch) still runs without one.
+if [ -n "${HG_CLIENT:-}" ]; then
+    probe_client=$HG_CLIENT
+elif command -v kitty >/dev/null; then
+    probe_client=kitty
+elif command -v foot >/dev/null; then
+    probe_client=foot
+else
+    probe_client=
+    echo "NOTE: neither kitty nor foot is installed — a probe that calls" \
+         "place/spawn_probe will fail; set HG_CLIENT to override." >&2
+fi
 mkdir -p "$OUT/shots" "$OUT/cfg/hypr" "$OUT/state" "$OUT/cache"
 
 HOST_SIG=${HYPRLAND_INSTANCE_SIGNATURE:-}
@@ -221,11 +239,12 @@ apply_layout() {
     # which measures like a tracking bug and is not one.
     if [ "$BW" -lt "$MIN_BW" ] || [ "$BH" -lt "$MIN_BH" ]; then
         die "MON_B came back ${BW}x${BH}, too small for the probe geometry (needs ${MIN_BW}x${MIN_BH}).
-     The host compositor resized the nested output's window. Add this to the
-     HOST hyprland.lua so it stops doing that, then re-run:
+     The host compositor resized the nested output's window. Apply the
+     runtime-only host rule once per host session, then re-run:
 
-       hl.window_rule({ name = 'nested-aq', match = { class = '^aquamarine$' },
-                        float = true, no_anim = true })
+       scripts/harness-host-rule.sh
+
+     (see docs/agents/harness.md; it floats class ^aquamarine\$ with no_anim)
 "
     fi
     # The displacement a coordinate bug produces must stay on screen.
@@ -250,7 +269,7 @@ start_daemon() {   # OUTPUT TAG
     env -u DISPLAY WAYLAND_DISPLAY="$NESTED_WL" HYPRLAND_INSTANCE_SIGNATURE="$NESTED_SIG" \
         XDG_CONFIG_HOME="$OUT/cfg" XDG_STATE_HOME="$OUT/state" \
         "$BIN" --config "$cfg" \
-               --effect windowglow --shader tools/harness_probe.frag \
+               --effect windowglow --shader "$PWD/tools/harness_probe.frag" \
                "${pin[@]}" >"$OUT/hyprglaze-$2.log" 2>&1 &
     DAEMON_PIDS+=($!)
     eval "DAEMON_${2}_PID=$!"
@@ -273,14 +292,35 @@ start_effect() {   # OUTPUT TAG EFFECT [CFG_DIR] — a real effect, pinned
     wait_for "hcj layers | jq -e --arg m '$1' '.[\$m].levels[\"0\"][]?|select(.namespace==\"hyprglaze\")' >/dev/null" 15
 }
 
+# Launch a bare probe client under the nested compositor and record it for
+# teardown. The client is forced to a flat #242424 background with no
+# decorations or padding so window-anim.probe.sh — which locates the window by
+# that exact colour — and the geometry probes, which assume the coloured rect
+# is the window rect, both stay valid regardless of which client runs.
+spawn_probe() {    # APP_ID
+    [ -n "$probe_client" ] || die "no probe client (install kitty or foot, or set HG_CLIENT)"
+    case "$probe_client" in
+      kitty)
+        env -u DISPLAY WAYLAND_DISPLAY="$NESTED_WL" HYPRLAND_INSTANCE_SIGNATURE="$NESTED_SIG" \
+            kitty --config NONE --class "$1" \
+                  -o background=#242424 -o background_opacity=1.0 \
+                  -o hide_window_decorations=yes -o window_padding_width=0 \
+                  -o remember_window_size=no >/dev/null 2>&1 & ;;
+      foot)
+        env -u DISPLAY WAYLAND_DISPLAY="$NESTED_WL" HYPRLAND_INSTANCE_SIGNATURE="$NESTED_SIG" \
+            foot --app-id="$1" >/dev/null 2>&1 & ;;
+      *)
+        die "unknown HG_CLIENT '$probe_client' (want kitty or foot)" ;;
+    esac
+    CLIENT_PIDS+=($!)
+}
+
 place() {          # CLASS WS LOCAL_X LOCAL_Y W H   (monitor-local coords)
     local cls=$1 ws=$2 lx=$3 ly=$4 w=$5 h=$6 ox=0 oy=0
     case "$ws" in 1[0-9]) ox=$BX; oy=$BY ;; esac
     local gx=$(( lx + ox )) gy=$(( ly + oy ))
     # Launch directly: `dispatch exec` would inherit the HOST display.
-    env -u DISPLAY WAYLAND_DISPLAY="$NESTED_WL" HYPRLAND_INSTANCE_SIGNATURE="$NESTED_SIG" \
-        foot --app-id="$cls" >/dev/null 2>&1 &
-    CLIENT_PIDS+=($!)
+    spawn_probe "$cls"
     wait_for "hcj clients | jq -e --arg c '$cls' '.[]|select(.class==\$c)' >/dev/null" 15
     # Every window dispatcher below acts on the ACTIVE window, so the new
     # window must actually be focused first — mapping and focusing are
