@@ -1,19 +1,19 @@
 #version 300 es
 precision highp float;
 
-// acrylic — Balatro-style paint bands shaped by the component's GPU flow field.
+// acrylic — Balatro-style paint bands carried by the component's GPU flow field.
 //
-// The native layer is procedural: it samples the local flow direction and lays
-// long, sinuous contour bands along it. The black body is broad and low
+// The native layer is procedural but sampled in a coordinate the flow carries
+// (`uv + disp`), so the bands travel and stretch with the stream and keep their
+// form instead of being re-derived each frame. The black body is broad and low
 // contrast, blue veins are narrow bands, and white is a rare thin core inside a
-// blue vein. Nothing is advected, so the bands keep crisp edges instead of
-// diffusing into a haze.
+// blue vein.
 
 uniform vec3 iResolution;
 uniform float iTime;
 
 uniform sampler2D iAcrFlowTex;   // RG velocity in px/s
-uniform sampler2D iAcrDyeTex;    // advected warp phase in R
+uniform sampler2D iAcrDyeTex;    // advected material displacement in RG
 uniform float iAcrActive;
 uniform float iAcrFlowScale;
 
@@ -63,49 +63,43 @@ void main() {
     vec3 deep = iPaletteSize > 11 ? iPalette[11] : vec3(0.07, 0.25, 0.68);
     vec3 white = iPaletteSize > 15 ? iPalette[15] : vec3(1.0);
 
-    // Local flow frame: the bands run along the stream. Blending toward a fixed
-    // direction at low speed avoids a hard seam where the field goes calm.
+    // The flow carries a material coordinate: the bands are sampled at
+    // (uv + disp), so the pattern travels and stretches with the stream instead
+    // of being re-derived from the current direction every frame. A window
+    // displaces `disp` locally and the deformation lingers; elsewhere the
+    // pattern keeps its form.
     vec2 vel = texture(iAcrFlowTex, uv).xy;
     float speed = length(vel);
-    vec2 vd = vel / max(speed, 1.0e-4);
-    vec2 gd = vec2(0.7071, 0.7071);
-    vec2 d0 = mix(gd, vd, smoothstep(0.0, 4.0, speed));
-    vec2 dir = length(d0) > 0.1 ? normalize(d0) : gd;
-    vec2 side = vec2(-dir.y, dir.x);
-
-    // Aspect-corrected centred coordinates.
-    vec2 p = (uv - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);
-    vec2 q = p * 3.0;
-
-    float along = dot(q, dir);
-    float across = dot(q, side);
+    vec2 disp = texture(iAcrDyeTex, uv).rg;
+    vec2 pc = (uv + disp - 0.5) * vec2(iResolution.x / iResolution.y, 1.0);
+    vec2 q = pc * 9.0;
     float t = iTime;
 
-    // The advected warp carries the window's drag as a persistent phase offset.
-    float warp = texture(iAcrDyeTex, uv).r;
+    // Long sinuous contours of the carried coordinate. The flow stretches that
+    // coordinate, so its level sets become filaments along the stream; the
+    // extra folds keep the veins from collapsing into a few flat strokes.
+    float f = q.y
+            + 0.85 * sin(q.x * 0.30)
+            + 0.45 * sin(q.x * 0.75 - q.y * 0.35)
+            + 0.22 * sin(q.x * 1.60 + q.y * 0.80)
+            + 0.10 * sin(q.x * 3.10 - q.y * 1.30);
 
-    // Long sinuous contours: the across-flow coordinate is warped mainly along
-    // the flow, so its level sets stretch into filaments instead of blobs.
-    float f = across + (warp - 0.5) * 10.0
-            + 0.45 * sin(along * 0.80 + t * 0.05)
-            + 0.22 * sin(along * 1.50 - across * 0.50 + t * 0.07)
-            + 0.10 * sin(along * 2.60 + across * 1.00 - t * 0.09);
-
-    // Slow organic modulation so the bands are never perfectly regular.
-    float n = fbm(p * 1.4 + vec2(t * 0.010, -t * 0.008));
+    // A fixed function of the carried coordinate, so the grain of the paint
+    // moves with it rather than flickering in place.
+    float n = fbm(q * 0.55);
 
     // Black body: broad bands, a low-contrast dark sheen rather than a field.
-    float bblack = 0.5 + 0.5 * sin(f * 1.00 + 0.6 + n * 0.8 + t * 0.015);
+    float bblack = 0.5 + 0.5 * sin(f * 1.00 + 0.6 + n * 0.8);
     float black_cov = smoothstep(0.20, 0.80, bblack);
     vec3 black_liq = mix(black, deep, 0.08 + 0.13 * black_cov);
 
     // Blue veins: narrow bands, the second liquid.
-    float bblue = 0.5 + 0.5 * sin(f * 2.80 + 1.9 + n * 0.9 + t * 0.030);
-    float blue_cov = smoothstep(0.95, 0.998, bblue);
+    float bblue = 0.5 + 0.5 * sin(f * 2.80 + 1.9 + n * 0.9);
+    float blue_cov = smoothstep(0.92, 0.995, bblue);
 
     // White: rare thin cores that only exist inside a blue vein.
-    float bwhite = 0.5 + 0.5 * sin(f * 5.50 + 3.4 + n * 1.2 + t * 0.035);
-    float white_cov = smoothstep(0.980, 0.9998, bwhite) * smoothstep(0.45, 0.95, blue_cov);
+    float bwhite = 0.5 + 0.5 * sin(f * 5.50 + 3.4 + n * 1.2);
+    float white_cov = smoothstep(0.970, 0.9996, bwhite) * smoothstep(0.45, 0.95, blue_cov);
 
     vec3 col = black;
     col = mix(col, black_liq, 0.92);

@@ -4,8 +4,9 @@
 //! `hg_gl.Target`s. Each frame a fragment pass self-advects it
 //! (semi-Lagrangian), then adds the drives:
 //!
-//!   * **windows** — a moving rect drags the fluid inside it and pushes a
-//!     little ahead of its leading edge, so the field bends around it;
+//!   * **windows** — each rect is a rigid body: flow cannot pass through it,
+//!     the interior is bled to a stop and nudged gently out, and a soft band
+//!     just outside follows the frame so the paint stretches with it;
 //!   * **off-screen sources** — a few broad vortices just outside the viewport
 //!     sweep streams in from different directions, so the whole surface moves
 //!     without a single uniform rotation;
@@ -15,16 +16,17 @@
 //!   * **vorticity confinement** — keeps shear layers curling into eddies;
 //!   * **viscosity** — an exponential decay that bleeds motion away.
 //!
-//! A second ping-pong pair carries a single **warp phase** (R). It is advected
-//! by the flow and relaxed toward a smooth base field. It is not paint: the
-//! display uses it to offset a procedural band coordinate, so a moving window
-//! drags the bands into a wake that lingers after the flow itself has relaxed.
+//! A second ping-pong pair carries a 2D **material displacement** (RG). It is
+//! advected by the flow and bled back toward zero so it stays anchored. It is
+//! not paint: the display samples the procedural bands at `uv + disp`, so the
+//! pattern is *carried by the flow* — it travels and stretches with the stream
+//! and keeps its form, instead of being re-derived from the current direction
+//! each frame. A window deforms `disp` locally and the deformation lingers,
+//! while the rest of the surface is left alone.
 //!
-//! The native layer is therefore procedural: it samples the local flow
-//! direction and lays long, sinuous Balatro-style contour bands along it. Black
-//! is the broad, low-contrast body; blue is a narrow vein system; white is a
-//! rare thin core inside a blue vein. Nothing colour-like is advected, so the
-//! bands keep crisp edges instead of diffusing into a haze.
+//! The native layer is therefore procedural bands in the carried coordinate.
+//! Black is the broad, low-contrast body; blue is a narrow vein system; white
+//! is a rare thin core inside a blue vein.
 //!
 //! Windows arrive as `hg_frame` rects; this component tracks previous rects to
 //! derive each window's velocity. There is no particle simulation.
@@ -57,7 +59,8 @@ const flow_frag_src: [:0]const u8 =
     \\uniform float uTime;
     \\uniform vec2 uMomentum;   // px/s, already integrated
     \\uniform float uVisc;      // 1/s decay
-    \\uniform float uForce;     // window drag strength
+    \\uniform float uForce;     // boundary drag rate, 1/s
+    \\uniform float uWinPush;   // px/s2, pushes flow out of a window
     \\uniform float uAmbient;   // curl-noise force strength
     \\uniform float uVort;      // vorticity confinement strength
     \\uniform int uSources;     // a few broad vortices just off-screen
@@ -158,29 +161,45 @@ const flow_frag_src: [:0]const u8 =
     \\    vel += uMomentum * uDt;
     \\    vel *= exp(-uVisc * uDt);
     \\
-    \\    // Windows: drag the fluid inside the rect and shear it at the edges.
+    \\    // Windows: rigid bodies. Flow cannot pass through a window: the
+    \\    // interior is bled to a stop and nudged out along its shortest way
+    \\    // out, so paint leaves the frame instead of piling up. A soft band
+    \\    // just outside follows the frame, so the surrounding paint stretches
+    \\    // with a moving window (blended, never flung).
     \\    for (int i = 0; i < uWinCount; i++) {
     \\        vec4 w = uWin[i];
     \\        vec2 lo = w.xy;
     \\        vec2 hi = w.xy + w.zw;
     \\        float inside = step(lo.x, uv.x) * step(uv.x, hi.x) *
     \\                       step(lo.y, uv.y) * step(uv.y, hi.y);
-    \\        vel = mix(vel, uWinVel[i], inside);
-    \\        // A soft band just outside pushes fluid ahead of a moving window.
+    \\
+    \\        // Shortest way out of the rect, so the interior empties cleanly.
+    \\        vec2 dl = uv - lo;
+    \\        vec2 dh = hi - uv;
+    \\        vec2 outward = vec2(0.0, 1.0);
+    \\        float m = min(min(dl.x, dh.x), min(dl.y, dh.y));
+    \\        if (m == dl.x) outward = vec2(-1.0, 0.0);
+    \\        else if (m == dh.x) outward = vec2(1.0, 0.0);
+    \\        else if (m == dl.y) outward = vec2(0.0, -1.0);
+    \\        vel *= (1.0 - inside);
+    \\        vel += outward * uWinPush * uDt * inside;
+    \\
     \\        vec2 d = max(lo - uv, uv - hi);
     \\        float outside = max(max(d.x, d.y), 0.0);
-    \\        float band = (1.0 - inside) * exp(-outside * 16.0);
-    \\        vel += uWinVel[i] * uForce * uDt * band;
+    \\        float band = (1.0 - inside) * exp(-outside * 12.0);
+    \\        vel = mix(vel, uWinVel[i], clamp(uForce * uDt * band, 0.0, 1.0));
     \\    }
     \\
     \\    fragColor = vec4(vel, 0.0, 1.0);
     \\}
 ;
 
-/// Warp pass: advects a single scalar `w` (R) with the flow. `w` is not paint;
-/// it is a phase offset for the procedural bands. It relaxes toward a smooth
-/// base field so it keeps its structure, while a window drags it into a wake
-/// that persists for a moment — the memory a memoryless band pattern lacks.
+/// Warp pass: advects a 2D **displacement** `d` (RG) of a material coordinate.
+/// `d` is not paint: the display samples the procedural bands at `uv + d`, so
+/// the pattern is *carried by the flow* — it stretches and travels with the
+/// stream instead of being re-derived from the current direction each frame.
+/// A window displaces `d` locally and the deformation persists, while the rest
+/// of the surface keeps its form. `d` decays toward zero so it stays bounded.
 const dye_frag_src: [:0]const u8 =
     \\#version 300 es
     \\precision highp float;
@@ -194,46 +213,20 @@ const dye_frag_src: [:0]const u8 =
     \\uniform vec2 uAspect;
     \\out vec4 fragColor;
     \\
-    \\float hash21(vec2 p) {
-    \\    p = fract(p * vec2(234.34, 435.345));
-    \\    p += dot(p, p + 34.23);
-    \\    return fract(p.x * p.y);
-    \\}
-    \\float vnoise(vec2 p) {
-    \\    vec2 i = floor(p);
-    \\    vec2 f = fract(p);
-    \\    vec2 u = f * f * (3.0 - 2.0 * f);
-    \\    float a = hash21(i);
-    \\    float b = hash21(i + vec2(1.0, 0.0));
-    \\    float c = hash21(i + vec2(0.0, 1.0));
-    \\    float d = hash21(i + vec2(1.0, 1.0));
-    \\    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-    \\}
-    \\float fbm(vec2 p) {
-    \\    float v = 0.0;
-    \\    float a = 0.55;
-    \\    for (int i = 0; i < 4; i++) {
-    \\        v += a * vnoise(p);
-    \\        p = mat2(1.6, 1.2, -1.2, 1.6) * p;
-    \\        a *= 0.55;
-    \\    }
-    \\    return v;
-    \\}
-    \\
     \\void main() {
     \\    vec2 uv = gl_FragCoord.xy / uRes;
     \\    vec2 vel = texture(uVel, uv).xy;
     \\
-    \\    // Advect the warp phase along the flow.
+    \\    // Carry the material coordinate: the point that was at `back` has
+    \\    // moved to `uv`, so its displacement grows by (uv - back).
     \\    vec2 back = uv - vel * uDt / uOut;
-    \\    float w = texture(uPrev, clamp(back, 0.0, 1.0)).r;
+    \\    vec2 d = texture(uPrev, clamp(back, 0.0, 1.0)).rg + (uv - back);
     \\
-    \\    // Relax toward a slow smooth base field, so the warp keeps structure
-    \\    // instead of diffusing away, and drifted dye cannot accumulate.
-    \\    float base = fbm(uv * uAspect * 2.5 + vec2(uTime * 0.006, -uTime * 0.005));
-    \\    w = mix(w, base, clamp(uRelax * uDt, 0.0, 1.0));
+    \\    // Bleed the displacement so the coordinate stays anchored to the screen
+    \\    // and cannot drift or smear without bound.
+    \\    d *= exp(-uRelax * uDt);
     \\
-    \\    fragColor = vec4(clamp(w, 0.0, 1.0), 0.0, 0.0, 1.0);
+    \\    fragColor = vec4(d, 0.0, 1.0);
     \\}
 ;
 
@@ -258,7 +251,8 @@ const State = struct {
 
     viscosity: f32 = 1.5,
     momentum: f32 = 0.05,
-    force: f32 = 18.0,
+    force: f32 = 8.0,
+    push: f32 = 600.0,
     ambient: f32 = 0.02,
     /// Single-scale confinement is grid-sensitive: keep it subtle until the
     /// multiscale version (flow-ref2) lands.
@@ -292,6 +286,7 @@ const State = struct {
         .momentum = "uMomentum",
         .visc = "uVisc",
         .force = "uForce",
+        .push = "uWinPush",
         .ambient = "uAmbient",
         .vort = "uVort",
         .sources = "uSources",
@@ -344,7 +339,8 @@ fn create(host: [*c]const c.hg_host, width: f32, height: f32) callconv(.c) ?*any
         .dye_h = dye_h,
         .viscosity = std.math.clamp(hp.getFloat("viscosity", 1.5), 0.0, 8.0),
         .momentum = std.math.clamp(hp.getFloat("momentum", 0.05), 0.0, 3.0),
-        .force = std.math.clamp(hp.getFloat("force", 18.0), 0.0, 40.0),
+        .force = std.math.clamp(hp.getFloat("force", 8.0), 0.0, 40.0),
+        .push = std.math.clamp(hp.getFloat("push", 600.0), 0.0, 6000.0),
         .ambient = std.math.clamp(hp.getFloat("ambient", 0.02), 0.0, 4.0),
         .vorticity = std.math.clamp(hp.getFloat("vorticity", 0.02), 0.0, 0.2),
         .sources = @intCast(std.math.clamp(hp.getInt("sources", 4), 0, 8)),
@@ -483,6 +479,7 @@ fn upload(handle: ?*anyopaque, program: u32) callconv(.c) void {
     s.pu.f2(.momentum, s.cur_vel[0], s.cur_vel[1]);
     s.pu.f1(.visc, s.viscosity);
     s.pu.f1(.force, s.force);
+    s.pu.f1(.push, s.push);
     s.pu.f1(.ambient, s.ambient);
     s.pu.f1(.vort, s.vorticity);
     s.pu.int(.sources, @intCast(s.sources));

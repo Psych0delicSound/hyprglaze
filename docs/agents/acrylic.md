@@ -70,22 +70,23 @@ turned into a convincing flow field. `acrylic` is now a GPU flow simulation.
   5. a second-order **momentum** spring-damper (`momentum`) chasing a slowly
      rotating target, so the global drift overshoots and reverses;
   6. exponential **viscosity** decay;
-  7. window drag: a moving rect carries the fluid inside it and pushes a soft
-      band ahead of its leading edge.
-- **Bands** — the native layer is now **procedural**, not advected paint. The
-  display samples the local flow direction and lays long, sinuous
-  Balatro-style contour bands along the stream: the across-flow coordinate is
-  warped mostly *along* the flow, so its level sets stretch into filaments
-  instead of blobs. **Black** is the broad, low-contrast body; **blue** is a
-  narrow vein system; **white** is a rare thin core gated inside a blue vein.
-  Because no colour is advected, the bands keep crisp edges instead of
-  diffusing into a haze.
-- **Warp phase** — a small second ping-pong pair at `warp_scale` (default 0.75)
-  carries a single advected scalar (R). It is *not* paint: the display uses it
-  to offset the band coordinate. The flow drags it, and it relaxes toward a
-  smooth base field at `warp_relax` (default 0.15/s), so a moving window pulls
-  the bands into a wake that lingers for a moment after the flow itself has
-  relaxed — the memory a memoryless band pattern lacks.
+  7. **windows as rigid bodies** (`force`/`push`): flow cannot pass through a
+     rect — the interior is bled to a stop and nudged gently out — while a soft
+     band just outside follows the frame, so the neighbouring paint stretches
+     with a moving window.
+- **Bands** — the native layer is **procedural bands in a carried coordinate**,
+  not advected paint. The display samples the bands at `uv + disp`, where `disp`
+  is a material displacement advected by the flow. Because the flow stretches
+  that coordinate, the band level sets become long sinuous filaments along the
+  stream, and — crucially — the pattern *keeps its form* as it travels instead
+  of being re-derived from the current direction every frame. **Black** is the
+  broad, low-contrast body; **blue** is a narrow vein system; **white** is a
+  rare thin core gated inside a blue vein.
+- **Displacement field** — a small second ping-pong pair at `warp_scale`
+  (default 0.75) carries `disp` (RG). Each frame it is advected by the flow and
+  bled back toward zero at `warp_relax` (default 0.15/s), so it stays anchored
+  and cannot drift or smear without bound. A window deforms `disp` locally and
+  the deformation lingers; elsewhere the band pattern is left alone.
 - **Windows** — rects come from `hg_frame`; the component tracks previous rects
   to derive each window's velocity. There is no CPU simulation and no
   `system.zig`.
@@ -103,23 +104,31 @@ band shaping is measured against.
 
 ### Known gaps
 
-- Windows are hard zero-velocity holes, not smooth laminar deflectors.
+- A window is a box rigid body: flow stops at its edges and is pushed out, but
+  it does not yet *deflect* smoothly around the corners, and the boundary drag
+  is a uniform band rather than a real no-slip layer.
+- The band pattern is now stable frame to frame (a moved window no longer
+  reshuffles distant flows), but the carried coordinate is low frequency, so
+  the surface currently reads as a few large ribbons rather than many fine
+  veins.
 
 ## Next iteration plan
 
 ### 1. Laminar flow around windows
 
-- Replace the hard zero-velocity rect with an obstacle boundary that deflects
-  the stream smoothly, and add a little vorticity at the shear edges so the
-  wake merges rather than forming rings.
-- Compression ahead of the leading edge, stretch behind.
+- Round the obstacle boundary and add a little vorticity at the shear edges so
+  the wake merges rather than forming rings; compress ahead of the leading edge
+  and stretch behind.
+- A true no-slip layer instead of a uniform drag band.
 
 ### 2. Acrylic tuning
 
 - Keep tuning the band ratios and the flow against **Black Blue OLED**; black
   must stay the bulk even when a window mixes hard. Current steady state settles
-  near 8–10% coloured and ~91% near-black.
+  near 12% coloured and ~88% near-black.
 - White is a rare vein core; its amount is provisional and will be fine-tuned.
+- More, finer veins: raise the carried-coordinate frequency / add folds without
+  reintroducing the global reshuffle.
 
 ### Acceptance
 

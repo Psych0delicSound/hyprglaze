@@ -28,7 +28,7 @@ A wallpaper daemon for Hyprland that renders GLSL shaders and modular effects on
 | `cellbloom` | Living Voronoi tissue around windows and cursor: rounded cells with glowing membranes that divide and fuse, lit by the music |
 | `concentric` | SDF concentric rings radiating from window edges, cursor interaction |
 | `fluid` | Metaball contour lines that merge organically around windows and cursor |
-| `acrylic` | A viscous theme-black liquid: a GPU flow field (directional off-screen vortices, ambient curl, vorticity and window drag) shapes long Balatro-style contour bands along the stream — a broad black body, narrow blue veins, rare white cores — while an advected warp phase lets windows drag the bands into a wake that lingers after the flow relaxes |
+| `acrylic` | A viscous theme-black liquid: a GPU flow field (directional off-screen vortices, ambient curl, vorticity and window drag) carries a procedural band coordinate so the paint travels and stretches with the stream — a broad black body, narrow blue veins, rare white cores — while each window is a rigid body that blocks flow through it, pushes it gently out, and drags the neighbouring paint along |
 | `starfield` | Flight through a 3D starfield: the cursor steers and the camera banks into turns, stars streak past with diffraction spikes on the bright ones, through a palette nebula that zooms by forever. Music pushes the speed, kicks surge it, and now and then it jumps to hyperspace |
 | `visualizer` | Stereo waveform with Catmull-Rom interpolation, amplitude-driven palette colors |
 | `milkdrop` | MilkDrop-style visualizer: eleven presets of per-frame motion equations (zoom, rotation, warp, ripple, kaleidoscope) over a half-float feedback loop, with scope/circle/spectrum/spiral waveforms, custom shapes, borders and video echo, blending into each other through patterned transitions. One preset draws your windows into the loop. Dreams on a synthetic wave when no music plays |
@@ -116,9 +116,10 @@ theme = "Rosé Pine"
 # ambient     = 0.02  # whole-surface curl-noise force
 # sources     = 4     # broad vortices just outside the screen (0 = off)
 # source      = 450   # strength of each off-screen vortex
-# force       = 18.0  # how strongly a moving window drags the flow
+# force       = 8.0   # how strongly a window drags the paint at its edge (1/s)
+# push        = 600   # how hard a window ejects flow from its interior (px/s²)
 # vorticity   = 0.02  # shear-layer curl; keeps eddies alive
-# warp_relax  = 0.15  # how fast the dragged band phase returns to its base (1/s)
+# warp_relax  = 0.15  # how fast the carried band coordinate re-anchors (1/s)
 
 [fur]
 # spacing = 23.0      # follicle spacing in px; finer shimmers and reads as noise
