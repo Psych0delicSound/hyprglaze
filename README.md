@@ -28,10 +28,10 @@ A wallpaper daemon for Hyprland that renders GLSL shaders and modular effects on
 | `cellbloom` | Living Voronoi tissue around windows and cursor: rounded cells with glowing membranes that divide and fuse, lit by the music |
 | `concentric` | SDF concentric rings radiating from window edges, cursor interaction |
 | `fluid` | Metaball contour lines that merge organically around windows and cursor |
+| `acrylic` | A theme-black liquid pool simulated with particle physics: a dense, low-friction packing where black is the bulk of the fluid and palette-coloured parcels drift through it. Windows are floating leaves — dragging one shoves the pool and sends a wake rippling across the surface |
 | `starfield` | Flight through a 3D starfield: the cursor steers and the camera banks into turns, stars streak past with diffraction spikes on the bright ones, through a palette nebula that zooms by forever. Music pushes the speed, kicks surge it, and now and then it jumps to hyperspace |
 | `visualizer` | Stereo waveform with Catmull-Rom interpolation, amplitude-driven palette colors |
 | `milkdrop` | MilkDrop-style visualizer: eleven presets of per-frame motion equations (zoom, rotation, warp, ripple, kaleidoscope) over a half-float feedback loop, with scope/circle/spectrum/spiral waveforms, custom shapes, borders and video echo, blending into each other through patterned transitions. One preset draws your windows into the loop. Dreams on a synthetic wave when no music plays |
-| `buddy` | Animated sprite character with procedural behaviors, palette-recolored |
 | `glitch` | Circuit-bent video feedback: a camera filming its own monitor, with your window frames as the only light. Stutter, freezes, skipping and slit-scan playback, sync loss, mosaic, crude dither, all in the theme's surface tones with brief accent bursts; music speeds the bends up |
 | `tide` | Rising water line tied to wall-clock time, with teardrops and splash jets |
 | `fire` | Flames rise from window top edges; moving windows leave a directional wake |
@@ -75,8 +75,8 @@ sudo zig build -Doptimize=ReleaseSafe --prefix /usr
 `~/.config/hypr/hyprglaze/hyprglaze.toml`:
 
 ```toml
-# Effects: particles, windowglow, cellbloom, concentric, fluid, starfield,
-#          visualizer, milkdrop, glitch, buddy, tide, fire, swarm,
+# Effects: particles, windowglow, cellbloom, concentric, fluid, acrylic,
+#          starfield, visualizer, milkdrop, glitch, buddy, tide, fire, swarm,
 #          voltaic, moire, ivy, whorl, weft, crystal, fur, amorphous, laser,
 #          flux
 effect = "fluid"
@@ -107,6 +107,14 @@ theme = "Rosé Pine"
 # sink     = "..."      # PulseAudio monitor source (auto-detected by default)
 # front    = 2          # fixed layer colors: a theme slot (1-16, the color_NN numbers
 # back     = "#C4A7E7"  # in themes.json) or a hex string; omit either to roll it
+
+[acrylic]
+# count     = auto   # particles in the pool; default scales with the screen area
+# black     = 0.88   # fraction of the liquid that is theme black (0.5-1.0); the
+#                    # rest take palette accent slots
+# radius    = 0.028  # particle radius, fraction of the shorter screen side
+# viscosity = 0.40   # linear drag (1/s): higher is thicker, slower liquid
+# current   = 1.0    # strength of the slow ambient current that stirs the pool
 
 [fur]
 # spacing = 23.0      # follicle spacing in px; finer shimmers and reads as noise
