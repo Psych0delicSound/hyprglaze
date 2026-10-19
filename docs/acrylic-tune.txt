@@ -1,1 +1,1 @@
-c370d31 git commit has a little better flow pushing logic, but wrong colors and very fast, i want to achieve same flow in current style
+c370d31 git commit has a little better flow pushing or inertia logic, but wrong colors and very fast, i want to achieve same flow in current style
