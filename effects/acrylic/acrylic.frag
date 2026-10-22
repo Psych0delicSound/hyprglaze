@@ -139,32 +139,8 @@ uniform float iTransition;
 uniform int iFocusedIndex;
 uniform int iPrevIndex;
 
-float hgField(vec2 uv) {
-    vec2 p = (uv - 0.5) * vec2(iResolution.x / max(iResolution.y, 1.0), 1.0);
-    vec2 q = p * 4.2;
-    float f = q.y
-        + 0.85 * sin(q.x * 0.30)
-        + 0.45 * sin(q.x * 0.75 - q.y * 0.35)
-        + 0.22 * sin(q.x * 1.60 + q.y * 0.80)
-        + 0.10 * sin(q.x * 3.10 - q.y * 1.30);
-    // A rotated family, so the vein network also runs into the vertical
-    // edges instead of only travelling sideways.
-    float g = q.x * 0.85
-        + 0.80 * sin(q.y * 0.28 + 1.2)
-        + 0.40 * sin(q.y * 0.70 - q.x * 0.45);
-    return f + 0.9 * sin(g);
-}
-
-float hgPaint(vec2 uv) {
-    float s = 0.5 + 0.5 * sin(hgField(uv));
-    // Wider veins near the borders, so more coloured flows enter from the
-    // edges of the screen and drift inward.
-    vec2 m = min(uv, 1.0 - uv);
-    float edge = 1.0 - smoothstep(0.0, 0.34, min(m.x, m.y));
-    return smoothstep(0.980 - 0.05 * edge, 0.999, s);
-}
-
-vec3 hgTheme(vec2 uv) { return vec3(hgPaint(uv)); }
+// uCh1 is the small-island paint field rendered once by the component.
+vec3 hgTheme(vec2 uv) { return texture(uCh1, uv).rgb; }
 
 // Rounded-box SDF for the window light (same shape as the flow obstacle).
 float hgWinSd(vec2 p, vec4 w, float r) {
@@ -223,7 +199,7 @@ vec3 hgPalette(float p) {
 // & this https://www.shadertoy.com/view/MsGSRd by flockeroo
 
 // displacement amount
-#define DISP_SCALE 1.50
+#define DISP_SCALE 0.90
 
 // chromatic dispersion samples
 #define SAMPLES 64

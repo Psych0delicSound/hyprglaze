@@ -1305,3 +1305,56 @@ pub const pass_d: [:0]const u8 =
     \\    mainImage(hg_fragColor, gl_FragCoord.xy);
     \\}
 ;
+
+pub const pass_paint: [:0]const u8 =
+    \\
+    \\#version 300 es
+    \\precision highp float;
+    \\uniform vec3 iResolution;
+    \\
+    \\float hgHash21(vec2 p) {
+    \\    p = fract(p * vec2(123.34, 456.21));
+    \\    p += dot(p, p + 45.32);
+    \\    return fract(p.x * p.y);
+    \\}
+    \\
+    \\// One layer of small, randomly placed paint islands. Each grid cell holds a
+    \\// single jittered, randomly rotated ellipse; the hash makes the layout stable
+    \\// between frames but different from one cell to the next. Some cells are left
+    \\// empty so the stream sizes and spacing stay irregular.
+    \\float hgIslands(vec2 p, float scale, float seed, float size) {
+    \\    vec2 cell = p * scale + seed;
+    \\    vec2 id = floor(cell);
+    \\    vec2 f = fract(cell) - 0.5;
+    \\
+    \\    float h0 = hgHash21(id + seed * 1.7);
+    \\    float h1 = hgHash21(id + seed * 3.1 + 11.0);
+    \\    float h2 = hgHash21(id + seed * 5.3 + 23.0);
+    \\    float h3 = hgHash21(id + seed * 7.9 + 41.0);
+    \\    float h4 = hgHash21(id + seed * 9.7 + 59.0);
+    \\
+    \\    vec2 q = f - (vec2(h0, h1) - 0.5) * 0.55;
+    \\    float a = h2 * 6.2831853;
+    \\    q = mat2(cos(a), -sin(a), sin(a), cos(a)) * q;
+    \\
+    \\    // Slightly elongated so the island reads as a short flow, not a dot.
+    \\    vec2 e = q / vec2(size * (0.7 + 0.9 * h3), size);
+    \\    float d = length(e);
+    \\    float b = 1.0 - smoothstep(0.35, 1.0, d);
+    \\    return b * b * (0.55 + 0.45 * h3) * step(0.22, h4);
+    \\}
+    \\
+    \\float hgPaint(vec2 uv) {
+    \\    vec2 p = (uv - 0.5) * vec2(iResolution.x / max(iResolution.y, 1.0), 1.0);
+    \\    float paint = 0.0;
+    \\    paint = max(paint, hgIslands(p, 4.5, 0.0, 0.28));
+    \\    paint = max(paint, hgIslands(p, 8.0, 3.0, 0.20));
+    \\    paint = max(paint, hgIslands(p, 15.0, 7.0, 0.14));
+    \\    return paint;
+    \\}
+    \\
+    \\out vec4 hg_fragColor;
+    \\void main() {
+    \\    hg_fragColor = vec4(vec3(hgPaint(gl_FragCoord.xy / iResolution.xy)), 1.0);
+    \\}
+;

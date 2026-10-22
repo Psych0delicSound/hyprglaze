@@ -17,8 +17,9 @@
 //! The GLSL lives in `shaders.zig` (generated from the original `.frag` files,
 //! bodies verbatim) and `acrylic.frag` (the Image pass, loaded by the host).
 //! `scripts/gen-acrylic-shaders.py` documents the only changes: Shadertoy
-//! plumbing, window rigid bodies appended to Buffers A/B/C, and a palette
-//! colour source in place of the reference's colour texture.
+//! plumbing, window rigid bodies appended to Buffers A/B/C, and a static
+//! small-island paint texture (rendered once by `pass_paint`) in place of the
+//! reference's colour texture.
 //!
 //! The Shadertoy input textures are synthesised: smooth value noise for Buffer
 //! A's seed and white noise for Buffer C's random rotation (both deterministic),
@@ -93,10 +94,16 @@ const State = struct {
     d: [2]hg_gl.Target = .{ .{}, .{} },
     d_cur: u1 = 0,
 
+    // Static paint source: the Image pass's replacement for the reference's
+    // colour texture. Rendered once into a small-island field, then sampled by
+    // the 64 dispersion taps (a texture read instead of procedural noise).
+    paint: hg_gl.Target = .{},
+
     prog_a: hg_gl.Program = .{},
     prog_b: hg_gl.Program = .{},
     prog_c: hg_gl.Program = .{},
     prog_d: hg_gl.Program = .{},
+    prog_paint: hg_gl.Program = .{},
 
     tex_noise_a: gl.GLuint = 0,
     tex_noise_c: gl.GLuint = 0,
@@ -339,6 +346,10 @@ fn ensureGl(s: *State) bool {
         log.err("buffer-d program failed", .{});
         return false;
     };
+    s.prog_paint = hg_gl.Program.init(shaders.pass_paint) catch {
+        log.err("paint program failed", .{});
+        return false;
+    };
 
     const opts = hg_gl.Target.Options{
         .format = .rgba16f,
@@ -350,6 +361,19 @@ fn ensureGl(s: *State) bool {
     for (&s.b) |*t| t.* = hg_gl.Target.init(s.buf_w, s.buf_h, opts) catch return false;
     for (&s.c) |*t| t.* = hg_gl.Target.init(s.buf_w, s.buf_h, opts) catch return false;
     for (&s.d) |*t| t.* = hg_gl.Target.init(s.buf_w, s.buf_h, opts) catch return false;
+
+    // The paint source is static: render the island field once. Repeat wrap
+    // keeps dispersion taps that cross an edge continuous with the far side.
+    s.paint = hg_gl.Target.init(s.buf_w, s.buf_h, .{
+        .format = .rgba8,
+        .filter = .linear,
+        .wrap = .repeat,
+    }) catch return false;
+    s.paint.begin();
+    s.u.use(s.prog_paint.program);
+    s.u.f3(.res, @floatFromInt(s.buf_w), @floatFromInt(s.buf_h), 1.0);
+    s.prog_paint.draw();
+    gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
 
     for (&s.a) |*t| clear(t);
     for (&s.b) |*t| clear(t);
@@ -493,6 +517,8 @@ fn upload(handle: ?*anyopaque, program: u32) callconv(.c) void {
     s.u.use(program);
     bindTex(gl.GL_TEXTURE0, s.d[s.d_cur].tex);
     s.u.int(.ch0, 0);
+    bindTex(gl.GL_TEXTURE1, s.paint.tex);
+    s.u.int(.ch1, 1);
     bindTex(gl.GL_TEXTURE2, s.c[s.c_cur].tex);
     s.u.int(.ch2, 2);
     s.u.int(.frame, s.frame);
@@ -508,10 +534,12 @@ fn destroy(handle: ?*anyopaque) callconv(.c) void {
     for (&s.b) |*t| t.deinit();
     for (&s.c) |*t| t.deinit();
     for (&s.d) |*t| t.deinit();
+    s.paint.deinit();
     s.prog_a.deinit();
     s.prog_b.deinit();
     s.prog_c.deinit();
     s.prog_d.deinit();
+    s.prog_paint.deinit();
     if (s.tex_noise_a != 0) gl.glDeleteTextures(1, &s.tex_noise_a);
     if (s.tex_noise_c != 0) gl.glDeleteTextures(1, &s.tex_noise_c);
     if (s.tex_key != 0) gl.glDeleteTextures(1, &s.tex_key);

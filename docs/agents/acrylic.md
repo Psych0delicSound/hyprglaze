@@ -1,106 +1,12 @@
-<<<<<<< HEAD
-`acrylic` is a component effect (`effects/acrylic/`) that reproduces the
-Shadertoy **flow-ref3** ("kind of viscous, like honey", xenn) —
-<https://www.shadertoy.com/view/7sGGRD> — pass for pass. Three things are tuned
-for a desktop wallpaper: windows are solid rigid bodies in the flow, the colour
-input is the live theme quantised to a black-dominant OLED palette, and the
-dynamics run slower and more viscous than the reference. Read
-`docs/agents/layout.md` for where files live and `docs/effect-porting.md` /
-`docs/agents/new-effect.md` for the component recipe.
-
-## The reference
-
-flow-ref3 is a five-pass mashup. Its JSON channel graph is the whole design:
-
-| pass | body | inputs (in order) |
-|---|---|---|
-| Image | displacement + dispersion (fork of cornusammonis' *Displacement with Dispersion*) | `ch0`=Buffer D, `ch1`=colour, `ch2`=Buffer C |
-| Buffer A | *A fracturing dynamical system* (MsyXRW) | `ch0`=Buffer D, `ch1`=noise A, `ch3`=keyboard |
-| Buffer B | *A fluid-like dynamical system* (XddSRX) | `ch0`=Buffer A |
-| Buffer C | flockaroo's *single pass CFD* | `ch0`=Buffer C (self), `ch1`=noise C, `ch2`=colour, `ch3`=Buffer B |
-| Buffer D | *Barbarella's Lava Lamp* (sstGWl) feedback | `ch0`=Buffer B, `ch1`=colour, `ch2`=Buffer C, `ch3`=Buffer B |
-
-Shadertoy renders buffers in order A→B→C→D (Image last) and a buffer reading a
-buffer that has *not yet* run this frame sees the previous frame. So the actual
-per-frame dependency is:
-
-```
-A  <- D(prev),  noiseA, keyboard
-B  <- A
-C  <- C(prev),  noiseC, colour, B
-D  <- B,        colour, C,      B
-Img<- D,        colour, C
-```
-
-The "collision" is the whole chain: the fracturing field (A) and the fluid field
-(B) feed each other through D, flockaroo's scale-mixing (C) advects them, and
-the lava lamp (D) wraps the result back into A next frame.
-
-## The port
-
-`effects/acrylic/effect.zig` keeps the four ping-pong pairs (`a`/`b`/`c`/`d`)
-and runs the passes in the order above, reproducing Shadertoy's
-previous-frame semantics exactly (A reads D's texture from last frame, C reads
-its own texture from last frame, etc.). `uRes0`/`uRes1` carry
-`iChannelResolution` for Buffer C's `randS`.
-
-The GLSL is not re-authored:
-
-- `effects/acrylic/acrylic.frag` — the Image pass; the host loads and
-  compiles it as the display shader.
-- `effects/acrylic/shaders.zig` — Buffers A–D, generated from the original
-  `.frag` files. The Common tab is prepended to each.
-
-The regeneration script is `scripts/gen-acrylic-shaders.py` (it reads the
-reference `.frag` files and rewrites `shaders.zig` + `acrylic.frag`). It makes
-these edits, all documented in its header:
-
-- Shadertoy plumbing: `iChannelN` → `uChN`, `iChannelResolution[0|1]` →
-  `uRes0|uRes1`, and a `main()` wrapper that calls the untouched `mainImage()`.
-- Window rigid bodies: an obstacle snippet appended to Buffers A, B and C and
-  applied to the field in the `main()` wrapper (see *Windows* below).
-- A theme colour source in the Image pass, replacing the reference's colour
-  texture `iChannel1` (see *Colours* below). The displacement and dispersion
-  maths is untouched.
-- Slow/viscous constants in Buffers A/B/C (see *Tuning* below); the equations
-  are untouched.
-
-### Inputs
-
-The reference's external textures are not shipped. The port synthesises them
-deterministically at first upload:
-
-- `noise_a` — smooth multi-octave value noise (coherent blobs; Buffer A seeds
-  from it).
-- `noise_c` — white noise (Buffer C steps a random rotation each frame).
-- keyboard — a 1×1 zero, so Buffer A's `reset()` never fires, the same as an
-  untouched wallpaper.
-
-This changes no movement logic: both noise inputs are 256×256 and drive exactly
-the same code paths as the reference images.
-
-### Colours
-
-The reference's colour JPEG (`iChannel1`) is replaced by `hgTheme(uv)`, a thin
-contour field: `hgField` is a sum of sines — a horizontal family plus a rotated
-one, so the vein network runs into the vertical edges too — and `hgPaint` keeps
-only the narrow top of `0.5 + 0.5*sin(field)`, so the source is mostly zero
-with long veins. Near the screen borders the vein band is widened (an
-`edge`-weighted `smoothstep` lower bound), so more coloured flows enter from
-every edge and drift inward. The Image pass's dispersion then averages that
-source along the displacement, and the surviving intensity `p` is mapped onto
-four theme slots:
-
-=======
 # acrylic — a 1:1 port of the flow-ref3 Shadertoy
 
 `acrylic` is a component effect (`effects/acrylic/`) that reproduces the
 Shadertoy **flow-ref3** ("kind of viscous, like honey", xenn) —
 <https://www.shadertoy.com/view/7sGGRD> — pass for pass. Three things are tuned
 for a desktop wallpaper: windows are solid rigid bodies in the flow, the colour
-input is the live theme quantised to a black-dominant OLED palette, and the
-dynamics run slower and more viscous than the reference. Read
-`docs/agents/layout.md` for where files live and `docs/effect-porting.md` /
+input is a static field of small paint islands quantised onto a black-dominant
+OLED palette, and the dynamics run slower and more viscous than the reference.
+Read `docs/agents/layout.md` for where files live and `docs/effect-porting.md` /
 `docs/agents/new-effect.md` for the component recipe.
 
 ## The reference
@@ -137,14 +43,16 @@ the lava lamp (D) wraps the result back into A next frame.
 and runs the passes in the order above, reproducing Shadertoy's
 previous-frame semantics exactly (A reads D's texture from last frame, C reads
 its own texture from last frame, etc.). `uRes0`/`uRes1` carry
-`iChannelResolution` for Buffer C's `randS`.
+`iChannelResolution` for Buffer C's `randS`. One extra program (`pass_paint`)
+renders the static colour source once at buffer resolution into a `paint`
+target; the Image pass reads it as `uCh1`.
 
 The GLSL is not re-authored:
 
 - `effects/acrylic/acrylic.frag` — the Image pass; the host loads and
   compiles it as the display shader.
-- `effects/acrylic/shaders.zig` — Buffers A–D, generated from the original
-  `.frag` files. The Common tab is prepended to each.
+- `effects/acrylic/shaders.zig` — Buffers A–D and the paint program, generated
+  from the original `.frag` files. The Common tab is prepended to each.
 
 The regeneration script is `scripts/gen-acrylic-shaders.py` (it reads the
 reference `.frag` files and rewrites `shaders.zig` + `acrylic.frag`). It makes
@@ -154,9 +62,9 @@ these edits, all documented in its header:
   `uRes0|uRes1`, and a `main()` wrapper that calls the untouched `mainImage()`.
 - Window rigid bodies: an obstacle snippet appended to Buffers A, B and C and
   applied to the field in the `main()` wrapper (see *Windows* below).
-- A theme colour source in the Image pass, replacing the reference's colour
-  texture `iChannel1` (see *Colours* below). The displacement and dispersion
-  maths is untouched.
+- A small-island paint source rendered into `uCh1`, replacing the reference's
+  colour texture `iChannel1` (see *Colours* below). The displacement maths is
+  untouched; the dispersion distance is shortened (see *Tuning*).
 - Slow/viscous constants in Buffers A/B/C (see *Tuning* below); the equations
   are untouched.
 
@@ -176,17 +84,17 @@ the same code paths as the reference images.
 
 ### Colours
 
-The reference's colour JPEG (`iChannel1`) is replaced by `hgTheme(uv)`, a thin
-contour field: `hgField` is a sum of sines — a horizontal family plus a rotated
-one, so the vein network runs into the vertical edges too — and `hgPaint` keeps
-only the narrow top of `0.5 + 0.5*sin(field)`, so the source is mostly zero
-with long veins. Near the screen borders the vein band is widened (an
-`edge`-weighted `smoothstep` lower bound), so more coloured flows enter from
-every edge and drift inward. The Image pass's dispersion then averages that
-source along the displacement, and the surviving intensity `p` is mapped onto
-four theme slots:
+The reference's colour JPEG (`iChannel1`) is replaced by `hgTheme(uv)`, which
+samples a static paint texture (`uCh1`) rendered once by `pass_paint`. That
+source is a field of **small islands**, not one continuous vein network:
+`hgPaint` stacks three jittered hash-grid layers, each cell holding a randomly
+sized, rotated, slightly elongated ellipse, with ~22% of cells left empty. On
+its own the source is mostly zero with scattered blobs, so the idle flow cannot
+settle into a single screen-spanning stream. The Image pass's dispersion then
+averages the source along the displacement, bending each island into a short
+stream that collides and slides around its neighbours. The surviving intensity
+`p` is mapped onto four theme slots:
 
->>>>>>> e9d9ac00d2ce3318c8bb8bf54deee88a98f9608d
 | band | source | target area |
 |---|---|---|
 | black | `iPaletteBg` | ~82% |
@@ -196,9 +104,15 @@ four theme slots:
 
 `hgPalette(p)` uses `smoothstep` thresholds at roughly the 80th, 88th and 94th
 percentiles of the dispersed intensity (`0.20`, `0.42`, `0.66`), so the screen
-reads as a broad OLED-black body with blue veins and white cores. The
+reads as a broad OLED-black body with blue streams and white cores. The
 thresholds are tuned for the palette above; they are the knobs to move if a
 theme's luminance changes the balance.
+
+The paint program is rendered with `iResolution` set to the buffer size and
+sampled with repeat/linear filtering, so edge-crossing dispersion taps stay
+continuous. Rendering it once (instead of evaluating the island hashes at every
+one of the 64 dispersion taps) keeps the Image pass at the same cost as the old
+procedural source.
 
 Two finishing touches are borrowed from `weft`: an additive field grain over the
 whole screen (10 Hz reseed, amplitude `0.035`, so the black body has a little
@@ -270,11 +184,13 @@ untouched):
 | B | `upd` | `0.99` | `0.9997` | more inertia, slower response |
 | C | self-advection `*2.0` | `2.0` | `0.12` | slower scale-mixing |
 | D | time uniform | `iTime` | `iTime * 0.10` | slower lava-lamp blend |
+| Image | `DISP_SCALE` | `1.50` | `0.90` | shorter dispersion; islands stay short streams instead of smearing into long ribbons |
 
-Measured on the wallpaper strips, the vein mask changes ~7% in 0.5 s and ~23% in
-2 s. Increasing the constants speeds the honey up; decreasing them risks a
-static field. These are compile-time replacements, so regenerate after editing
-the script.
+The dispersion scale is what sets the perceived flow length: raising it smears
+each paint island further along the velocity field and ties neighbours into long
+ribbons; lowering it keeps the islands as separate little flows. Increasing the
+buffer constants speeds the honey up; decreasing them risks a static field.
+These are compile-time replacements, so regenerate after editing the script.
 
 ## Config
 
@@ -310,10 +226,10 @@ scripts/rebuild.sh
 ~/.local/bin/hyprglaze --effect acrylic --fps   # cold-load, watch /tmp/hyprglaze.log
 ```
 
-The five passes are GPU shaders compiled at load, so `zig build` cannot catch a
-shader error — always cold-load and read the log. A uniform typo renders flat and
-still "succeeds".
+The five buffer/Image passes and the paint program are GPU shaders compiled at
+load, so `zig build` cannot catch a shader error — always cold-load and read the
+log. A uniform typo renders flat and still "succeeds".
 
-At 1920×1200 with `scale = 0.8` the four buffers plus the Image pass run at
-~60 FPS on the reference machine.
+At 1920×1200 with `scale = 0.8` the four buffers, the one-off paint pass and the
+Image pass run at ~60 FPS on the reference machine.
 

@@ -14,10 +14,13 @@ The pass bodies and the Common tab are copied verbatim, with these additions:
     expanded to spaces (Zig string literals reject raw tabs).
   * Window rigid bodies (`hgObstacle`, appended to Buffers A/B/C): windows are
     solid no-penetration bodies in the flow, so the fields bend around them.
-  * A theme-colour source in the Image pass, replacing the reference's colour
-    texture (`iChannel1`). The dispersed intensity is quantised onto the live
-    palette (mostly OLED black, with deep/light-blue and white veins), while
-    the displacement/dispersion maths is untouched.
+  * A theme-colour source replacing the reference's colour texture
+    (`iChannel1`): a static field of small, hashed paint islands, rendered once
+    at buffer resolution into `uCh1` by `pass_paint`. The Image pass's
+    dispersion shortens (`DISP_SCALE`) so each island stays a short stream
+    instead of smearing into a screen-spanning ribbon; the dispersed intensity
+    is quantised onto the live palette (mostly OLED black, with deep/light-blue
+    and white streaks). The displacement maths is untouched.
   * Slow/viscous `tune()` constants in Buffers A/B/C (advection distances and
     timestep down, fluid inertia up). The equations are untouched.
 
@@ -150,10 +153,68 @@ vec2 hgObstacle(vec2 v, vec2 px) {
 }
 """
 
-# Theme-colour source for the Image pass. It stands in for the reference's
-# colour texture: a thin contour field, mostly black, whose veins are averaged
-# along the displacement by `sampleDisp`. The final stage maps the surviving
-# intensity onto the theme's black / deep-blue / light-blue / white ramp.
+# Paint source. It stands in for the reference's colour texture: a static
+# field of small, randomly placed islands rather than one continuous vein
+# network. Rendered once at buffer resolution into `uCh1` (see effect.zig), so
+# the Image pass's 64 dispersion taps are texture reads instead of re-evaluating
+# a procedural source per tap. The scattered islands keep the idle field from
+# collapsing into a single screen-spanning flow, and the flow's own displacement
+# bends them into short, distinct streams that collide and slide past each other.
+PAINT = """
+#version 300 es
+precision highp float;
+uniform vec3 iResolution;
+
+float hgHash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+// One layer of small, randomly placed paint islands. Each grid cell holds a
+// single jittered, randomly rotated ellipse; the hash makes the layout stable
+// between frames but different from one cell to the next. Some cells are left
+// empty so the stream sizes and spacing stay irregular.
+float hgIslands(vec2 p, float scale, float seed, float size) {
+    vec2 cell = p * scale + seed;
+    vec2 id = floor(cell);
+    vec2 f = fract(cell) - 0.5;
+
+    float h0 = hgHash21(id + seed * 1.7);
+    float h1 = hgHash21(id + seed * 3.1 + 11.0);
+    float h2 = hgHash21(id + seed * 5.3 + 23.0);
+    float h3 = hgHash21(id + seed * 7.9 + 41.0);
+    float h4 = hgHash21(id + seed * 9.7 + 59.0);
+
+    vec2 q = f - (vec2(h0, h1) - 0.5) * 0.55;
+    float a = h2 * 6.2831853;
+    q = mat2(cos(a), -sin(a), sin(a), cos(a)) * q;
+
+    // Slightly elongated so the island reads as a short flow, not a dot.
+    vec2 e = q / vec2(size * (0.7 + 0.9 * h3), size);
+    float d = length(e);
+    float b = 1.0 - smoothstep(0.35, 1.0, d);
+    return b * b * (0.55 + 0.45 * h3) * step(0.22, h4);
+}
+
+float hgPaint(vec2 uv) {
+    vec2 p = (uv - 0.5) * vec2(iResolution.x / max(iResolution.y, 1.0), 1.0);
+    float paint = 0.0;
+    paint = max(paint, hgIslands(p, 4.5, 0.0, 0.28));
+    paint = max(paint, hgIslands(p, 8.0, 3.0, 0.20));
+    paint = max(paint, hgIslands(p, 15.0, 7.0, 0.14));
+    return paint;
+}
+
+out vec4 hg_fragColor;
+void main() {
+    hg_fragColor = vec4(vec3(hgPaint(gl_FragCoord.xy / iResolution.xy)), 1.0);
+}
+"""
+
+# The Image pass samples the rendered paint source. The final stage maps the
+# dispersed intensity onto the theme's black / deep-blue / light-blue / white
+# ramp.
 THEME = """
 // ---- theme paint source (replaces the reference colour texture) ----------
 // Display-only inputs (the host sets these for the Image/display shader).
@@ -163,32 +224,8 @@ uniform float iTransition;
 uniform int iFocusedIndex;
 uniform int iPrevIndex;
 
-float hgField(vec2 uv) {
-    vec2 p = (uv - 0.5) * vec2(iResolution.x / max(iResolution.y, 1.0), 1.0);
-    vec2 q = p * 4.2;
-    float f = q.y
-        + 0.85 * sin(q.x * 0.30)
-        + 0.45 * sin(q.x * 0.75 - q.y * 0.35)
-        + 0.22 * sin(q.x * 1.60 + q.y * 0.80)
-        + 0.10 * sin(q.x * 3.10 - q.y * 1.30);
-    // A rotated family, so the vein network also runs into the vertical
-    // edges instead of only travelling sideways.
-    float g = q.x * 0.85
-        + 0.80 * sin(q.y * 0.28 + 1.2)
-        + 0.40 * sin(q.y * 0.70 - q.x * 0.45);
-    return f + 0.9 * sin(g);
-}
-
-float hgPaint(vec2 uv) {
-    float s = 0.5 + 0.5 * sin(hgField(uv));
-    // Wider veins near the borders, so more coloured flows enter from the
-    // edges of the screen and drift inward.
-    vec2 m = min(uv, 1.0 - uv);
-    float edge = 1.0 - smoothstep(0.0, 0.34, min(m.x, m.y));
-    return smoothstep(0.980 - 0.05 * edge, 0.999, s);
-}
-
-vec3 hgTheme(vec2 uv) { return vec3(hgPaint(uv)); }
+// uCh1 is the small-island paint field rendered once by the component.
+vec3 hgTheme(vec2 uv) { return texture(uCh1, uv).rgb; }
 
 // Rounded-box SDF for the window light (same shape as the flow obstacle).
 float hgWinSd(vec2 p, vec4 w, float r) {
@@ -267,6 +304,10 @@ def tune(fname, text):
         text = text.replace("const float upd = 0.99;", "const float upd = 0.9997;")
     elif fname == "flow-ref3-buffer-c.frag":
         text = text.replace("v*vec2(-1,1)*2.0", "v*vec2(-1,1)*0.12")
+    elif fname == "flow-ref3.frag":
+        # Shorter dispersion: the paint islands stay short, separate streams
+        # instead of being smeared into screen-spanning ribbons.
+        text = text.replace("#define DISP_SCALE 1.50", "#define DISP_SCALE 0.90")
     return text
 
 
@@ -350,6 +391,7 @@ def main():
     ]
     for name, fname, post in PASSES:
         out.append(zstr(name, build(fname, OBSTACLE if post else "", post)))
+    out.append(zstr("pass_paint", PAINT))
     with open(os.path.join(OUT, "shaders.zig"), "w") as f:
         f.write("\n".join(out))
     with open(os.path.join(OUT, "acrylic.frag"), "w") as f:
