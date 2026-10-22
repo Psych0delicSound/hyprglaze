@@ -20,7 +20,9 @@ The pass bodies and the Common tab are copied verbatim, with these additions:
     dispersion shortens (`DISP_SCALE`) so each island stays a short stream
     instead of smearing into a screen-spanning ribbon; the dispersed intensity
     is quantised onto the live palette (mostly OLED black, with deep/light-blue
-    and white streaks). The displacement maths is untouched.
+    streams). The white spots are drawn as constant-width outlines of their
+    shape (`hgOutline`) instead of filled cores, so their core keeps the
+    light-blue band. The displacement maths is untouched.
   * Slow/viscous `tune()` constants in Buffers A/B/C (advection distances and
     timestep down, fluid inertia up). The equations are untouched.
 
@@ -265,8 +267,29 @@ float hgGrain(vec2 cell, float seed) {
     return float(v.x & 0x00ffffffu) / 16777216.0;
 }
 
-// Black body, deep-blue veins, rarer light-blue veins, rare white cores.
-vec3 hgPalette(float p) {
+// The white spots are drawn as an outline instead of a fill: the shape stays
+// exactly where it was, but only its rim is painted white and the core keeps
+// the light-blue band.
+//
+// The dispersed intensity `p` is a smooth hill per spot, so the gradient of
+// `p` turns the p = HG_EDGE contour into a signed distance in pixels. The
+// band around that contour therefore keeps the same width on every spot,
+// whatever its size, instead of the width a threshold band would give.
+float hgOutline(float p) {
+    const float edge = 0.660;   // where the white spots used to start
+    const float halfWidth = 3.0;  // half the outline width, in pixels
+    vec2 g = vec2(dFdx(p), dFdy(p));
+    float gm = length(g);
+    float d = (p - edge) / max(gm, 1.0e-5);   // pixels to the contour
+    float band = 1.0 - smoothstep(halfWidth - 1.0, halfWidth + 1.0, abs(d));
+    // Only the neighbourhood of the contour may be white; a flat field has no
+    // gradient and must stay black.
+    band *= smoothstep(edge - 0.12, edge - 0.04, p);
+    return band;
+}
+
+// Black body, deep-blue veins, rarer light-blue veins, white spot outlines.
+vec3 hgPalette(float p, float outline) {
     vec3 black = iPaletteBg;
     vec3 deep  = (iPaletteSize > 10) ? iPalette[10] : vec3(0.07, 0.25, 0.68);
     vec3 light = (iPaletteSize > 2)  ? iPalette[2]  : vec3(0.18, 0.56, 1.00);
@@ -274,7 +297,7 @@ vec3 hgPalette(float p) {
     vec3 c = black;
     c = mix(c, deep,  smoothstep(0.200, 0.240, p));
     c = mix(c, light, smoothstep(0.420, 0.470, p));
-    c = mix(c, white, smoothstep(0.660, 0.710, p));
+    c = mix(c, white, clamp(outline, 0.0, 1.0));
     return c;
 }
 """
@@ -332,7 +355,8 @@ def theme_image(body):
         replacement = "colz = vec3((col.r + col.g + col.b) / 3.0);"
     else:
         replacement = (
-            "colz = hgPalette((col.r + col.g + col.b) / 3.0);\n"
+            "float hgP = (col.r + col.g + col.b) / 3.0;\n"
+            "     colz = hgPalette(hgP, hgOutline(hgP));\n"
             "     colz = hgWindowLight(colz, gl_FragCoord.xy);\n"
             "     colz += (hgGrain(floor(gl_FragCoord.xy / 2.0), floor(iTime * 10.0)) - 0.5) * 0.035;"
         )

@@ -99,14 +99,23 @@ stream that collides and slides around its neighbours. The surviving intensity
 |---|---|---|
 | black | `iPaletteBg` | ~82% |
 | deep blue | `iPalette[10]` (`#1240b0` on Black Blue OLED) | ~9% |
-| light blue | `iPalette[2]` (`#2e8fff`) | ~4.5% |
-| white | `iPalette[15]` | ~4.5% |
+| light blue | `iPalette[2]` (`#2e8fff`) | ~12% |
+| white | `iPalette[15]` | thin outlines (~2%) |
 
-`hgPalette(p)` uses `smoothstep` thresholds at roughly the 80th, 88th and 94th
-percentiles of the dispersed intensity (`0.20`, `0.42`, `0.66`), so the screen
-reads as a broad OLED-black body with blue streams and white cores. The
-thresholds are tuned for the palette above; they are the knobs to move if a
-theme's luminance changes the balance.
+`hgPalette(p, outline)` uses `smoothstep` thresholds at roughly the 80th and 88th
+percentiles of the dispersed intensity (`0.20`, `0.42`), so the screen reads as
+a broad OLED-black body with blue streams. The thresholds are tuned for the
+palette above; they are the knobs to move if a theme's luminance changes the
+balance.
+
+The white spots are **outlines, not fills**. `hgOutline(p)` takes the gradient
+of the dispersed intensity (`dFdx`/`dFdy`) and turns the `p = 0.66` contour into
+a signed distance in pixels, so the white band around it has the same width on
+every spot, whatever the spot's size, and the core of the spot keeps the
+light-blue band. Only the neighbourhood of the contour can turn white, so the
+flat black field never picks up an outline. The white half-width is 3 px
+(`halfWidth` in the generator) and the whole feature is one line of the
+generator — the blue bands are untouched.
 
 The paint program is rendered with `iResolution` set to the buffer size and
 sampled with repeat/linear filtering, so edge-crossing dispersion taps stay
