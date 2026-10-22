@@ -17,9 +17,22 @@
 //! The GLSL lives in `shaders.zig` (generated from the original `.frag` files,
 //! bodies verbatim) and `acrylic.frag` (the Image pass, loaded by the host).
 //! `scripts/gen-acrylic-shaders.py` documents the only changes: Shadertoy
-//! plumbing, window rigid bodies appended to Buffers A/B/C, and a static
+//! plumbing, window rigid bodies appended to Buffers A/B/C, a static
 //! small-island paint texture (rendered once by `pass_paint`) in place of the
-//! reference's colour texture.
+//! reference's colour texture, a whole-screen rotation, and random impulses
+//! that stir the flow.
+//!
+//! Two additions keep the wallpaper alive, which the reference does not need:
+//!
+//!   * the whole screen turns. The component drives a slow, steady angle in
+//!     one direction; the Image pass samples the field through it and the
+//!     buffer passes turn their pixel coordinates the other way, so a window
+//!     keeps its hole in the flow while the honey turns around it;
+//!   * random impulses. The honey settles into one static pattern if nothing
+//!     disturbs it, so the component throws a few blobs of force at the flow
+//!     (Buffer D, which the Image pass reads) every now and then. Each blob
+//!     pushes, drags and swirls the field, so the flow keeps moving and
+//!     keeps bending.
 //!
 //! The Shadertoy input textures are synthesised: smooth value noise for Buffer
 //! A's seed and white noise for Buffer C's random rotation (both deterministic),
@@ -37,6 +50,9 @@ const gl = hg.gl;
 const log = std.log.scoped(.acrylic);
 
 const max_windows = 32;
+
+/// How many stirring blobs can be alive at once.
+const max_impulses = 4;
 
 /// Every uniform the passes share. One cached-location table serves all of
 /// them: `Uniforms.use` re-resolves when the program changes.
@@ -62,7 +78,55 @@ const U = hg.Uniforms(.{
     .win_turn = "uWinTurn",
     .win_curl = "uWinCurl",
     .win_wall = "uWinWall",
+    .rot = "uRotate",
+    .rot_center = "uRotCenter",
+    .imp = "uImpulse[0]",
+    .imp_dir = "uImpulseDir[0]",
+    .imp_count = "uImpulseCount",
 });
+
+/// xorshift64: the impulses only need noise, not a cryptographic stream.
+const Rng = struct {
+    s: u64 = 0x2545f4914f6cdd1d,
+
+    fn next(self: *Rng) u64 {
+        var x = self.s;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.s = x;
+        return x;
+    }
+
+    /// Uniform in [0, 1).
+    fn unit(self: *Rng) f32 {
+        return @as(f32, @floatFromInt(self.next() >> 40)) * (1.0 / 16777216.0);
+    }
+
+    /// Uniform in [lo, hi).
+    fn range(self: *Rng, lo: f32, hi: f32) f32 {
+        return lo + (hi - lo) * self.unit();
+    }
+};
+
+/// One stirring blob. The honey is content to sit still, so the component
+/// throws a blob of force at the flow every now and then.
+const Impulse = struct {
+    active: bool = false,
+    /// Centre, in buffer pixels of the *screen* frame.
+    x: f32 = 0,
+    y: f32 = 0,
+    /// Unit travel direction (screen frame).
+    dx: f32 = 1,
+    dy: f32 = 0,
+    /// How fast the blob travels, buffer px/s.
+    speed: f32 = 0,
+    /// Blob radius, buffer px.
+    radius: f32 = 100,
+    age: f32 = 0,
+    life: f32 = 1,
+    strength: f32 = 0,
+};
 
 const Tracked = struct {
     addr: u64 = 0,
@@ -126,6 +190,23 @@ const State = struct {
     tracked: [max_windows]Tracked = [_]Tracked{.{}} ** max_windows,
     tracked_count: usize = 0,
 
+    // Whole-screen rotation: a slow, steady turn in one direction, eased in
+    // over a few seconds and never reversing.
+    rot_angle: f32 = 0,
+    rot_vel: f32 = 0,
+    rot_target: f32 = 0,
+    rot_speed: f32 = 0.12, // max |angular velocity|, rad/s
+    rot_mult: f32 = 1.0,
+
+    // Random impulses that stir the flow.
+    impulses: [max_impulses]Impulse = [_]Impulse{.{}} ** max_impulses,
+    imp_buf: [max_impulses][4]f32 = [_][4]f32{.{ 0, 0, 0, 0 }} ** max_impulses,
+    imp_dir_buf: [max_impulses][2]f32 = [_][2]f32{.{ 0, 0 }} ** max_impulses,
+    imp_timer: f32 = 0,
+    imp_rate: f32 = 0.6, // impulses per second
+    imp_strength: f32 = 1.0,
+    rng: Rng = .{},
+
     u: U = .{},
     frame: i32 = 0,
     time: f32 = 0,
@@ -134,6 +215,16 @@ const State = struct {
     gl_ready: bool = false,
     gl_failed: bool = false,
 };
+
+/// Seed the impulse/rotation noise from the monotonic clock, so two runs of
+/// the daemon do not stir in the same pattern.
+fn seedRng() u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return 0x2545f4914f6cdd1d;
+    const sec: u64 = @intCast(@max(ts.sec, 0));
+    const nsec: u64 = @intCast(@max(ts.nsec, 0));
+    return sec *% 1_000_000_000 +% nsec;
+}
 
 fn create(host: [*c]const c.hg_host, width: f32, height: f32) callconv(.c) ?*anyopaque {
     const hp = hg.Host{ .raw = @ptrCast(host) };
@@ -144,6 +235,13 @@ fn create(host: [*c]const c.hg_host, width: f32, height: f32) callconv(.c) ?*any
     const scale = std.math.clamp(hp.getFloat("scale", 0.8), 0.1, 1.0);
     const buf_w: i32 = @intFromFloat(@max(16.0, @round(width * scale)));
     const buf_h: i32 = @intFromFloat(@max(16.0, @round(height * scale)));
+
+    const imp_strength = std.math.clamp(hp.getFloat("impulse", 1.0), 0.0, 8.0) * 0.25;
+    const imp_rate = std.math.clamp(hp.getFloat("impulse_rate", 0.6), 0.0, 20.0) * 0.2;
+    const rot_speed = std.math.clamp(hp.getFloat("rotate_speed", 0.12), 0.0, 2.0) * 0.32;
+    const rot_mult = std.math.clamp(hp.getFloat("rotate", 1.0), 0.0, 8.0);
+
+    var rng = Rng{ .s = seedRng() | 1 };
 
     state.* = .{
         .width = width,
@@ -159,6 +257,14 @@ fn create(host: [*c]const c.hg_host, width: f32, height: f32) callconv(.c) ?*any
         .win_turn = std.math.clamp(hp.getFloat("win_turn", 0.85), 0.0, 1.0),
         .win_curl = std.math.clamp(hp.getFloat("win_curl", 0.25), 0.0, 1.0),
         .win_wall = std.math.clamp(hp.getFloat("win_wall", 0.6), 0.0, 1.0),
+        .rot_speed = rot_speed,
+        .rot_mult = rot_mult,
+        // Start out turning, so the picture is never static.
+        .rot_target = rot_speed * rot_mult,
+        .imp_strength = imp_strength,
+        .imp_rate = imp_rate,
+        .imp_timer = rng.range(3.0, 14.0),
+        .rng = rng,
     };
     return @ptrCast(state);
 }
@@ -212,6 +318,95 @@ fn update(handle: ?*anyopaque, frame: [*c]const c.hg_frame) callconv(.c) void {
     s.win_count = @intCast(count);
     s.tracked = next;
     s.tracked_count = count;
+
+    stepRotation(s, dt);
+    stepImpulses(s, dt);
+}
+
+/// Ease the screen's rotation towards a steady target velocity: one direction,
+/// ramping in smoothly and never reversing.
+fn stepRotation(s: *State, dt: f32) void {
+    // Smooth, long ease (~5 s) towards the target speed.
+    s.rot_vel += (s.rot_target - s.rot_vel) * (1.0 - @exp(-dt / 5.0));
+    s.rot_angle += s.rot_vel * dt;
+    // Keep the angle in [-pi, pi] so the trigonometry stays precise.
+    if (s.rot_angle > std.math.pi) s.rot_angle -= std.math.tau;
+    if (s.rot_angle < -std.math.pi) s.rot_angle += std.math.tau;
+}
+
+/// Throw the next stirring blob, and age the live ones.
+fn stepImpulses(s: *State, dt: f32) void {
+    s.imp_timer -= dt;
+    if (s.imp_timer <= 0) {
+        if (s.imp_rate > 0.0 and s.imp_strength > 0.0) {
+            // Exponential delay: the stirring comes in bursts, with quiet
+            // stretches in between.
+            const u = @max(s.rng.unit(), 1.0e-6);
+            s.imp_timer = -@log(u) / s.imp_rate;
+            spawnImpulse(s);
+        } else {
+            s.imp_timer = 1.0;
+        }
+    }
+
+    for (&s.impulses) |*im| {
+        if (!im.active) continue;
+        im.age += dt;
+        if (im.age >= im.life) {
+            im.active = false;
+            continue;
+        }
+        im.x += im.dx * im.speed * dt;
+        im.y += im.dy * im.speed * dt;
+    }
+}
+
+fn spawnImpulse(s: *State) void {
+    var slot: usize = max_impulses;
+    for (s.impulses, 0..) |im, i| {
+        if (!im.active) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == max_impulses) return;
+
+    const bw = @as(f32, @floatFromInt(s.buf_w));
+    const bh = @as(f32, @floatFromInt(s.buf_h));
+    const dir_a = s.rng.range(0.0, std.math.tau);
+    s.impulses[slot] = .{
+        .active = true,
+        // Keep the blob off the very edge: the screen rotates, so a blob at
+        // the rim would spend most of its life outside the picture.
+        .x = s.rng.range(0.18, 0.82) * bw,
+        .y = s.rng.range(0.18, 0.82) * bh,
+        .dx = @cos(dir_a),
+        .dy = @sin(dir_a),
+        .speed = s.rng.range(8.0, 30.0),
+        .radius = s.rng.range(90.0, 150.0),
+        .age = 0,
+        .life = s.rng.range(7.0, 11.0),
+        .strength = s.imp_strength * s.rng.range(0.7, 1.2),
+    };
+}
+
+/// Quad ease-in-out: a gentle ramp at both ends, so the blob swells in and
+/// dies away without a corner in the force.
+fn easeQuadInOut(t: f32) f32 {
+    const x = std.math.clamp(t, 0.0, 1.0);
+    if (x < 0.5) return 2.0 * x * x;
+    const y = 1.0 - x;
+    return 1.0 - 2.0 * y * y;
+}
+
+/// Quad-eased swell and fade: slow to stir, slow to fade, no corners.
+fn impulseEnvelope(im: Impulse) f32 {
+    const attack: f32 = 0.9;
+    const release: f32 = 1.6;
+    if (im.age < attack) return easeQuadInOut(im.age / attack);
+    const fade_start = @max(im.life - release, attack);
+    if (im.age < fade_start) return 1.0;
+    return easeQuadInOut(1.0 - (im.age - fade_start) / @max(im.life - fade_start, 1.0e-4));
 }
 
 fn bindTex(unit: gl.GLenum, tex: gl.GLuint) void {
@@ -355,7 +550,9 @@ fn ensureGl(s: *State) bool {
         .format = .rgba16f,
         .half_float_fallback = true,
         .filter = .linear,
-        .wrap = .clamp,
+        // The whole screen rotates, so the Image pass samples the buffers
+        // past their edge: they have to wrap instead of clamping.
+        .wrap = .repeat,
     };
     for (&s.a) |*t| t.* = hg_gl.Target.init(s.buf_w, s.buf_h, opts) catch return false;
     for (&s.b) |*t| t.* = hg_gl.Target.init(s.buf_w, s.buf_h, opts) catch return false;
@@ -422,6 +619,32 @@ fn setWindows(s: *State, u: *U, speed: f32) void {
     u.f1(.win_wall, s.win_wall);
 }
 
+/// The rotation is driven from the CPU: a slow, steady angle that eases in
+/// once and never changes direction. The shaders only need its cosine and
+/// sine, plus the centre they turn about — in the framebuffer's own pixels.
+fn setRotation(s: *State, u: *U, cx: f32, cy: f32) void {
+    u.f2(.rot, @cos(s.rot_angle), @sin(s.rot_angle));
+    u.f2(.rot_center, cx, cy);
+}
+
+/// The stirring blobs, packed for the `uImpulse`/`uImpulseDir` arrays.
+fn setImpulses(s: *State, u: *U) void {
+    var n: usize = 0;
+    for (s.impulses) |im| {
+        if (!im.active) continue;
+        const strength = im.strength * impulseEnvelope(im);
+        if (strength <= 0.0) continue;
+        s.imp_buf[n] = .{ im.x, im.y, im.radius, strength };
+        s.imp_dir_buf[n] = .{ im.dx, im.dy };
+        n += 1;
+    }
+    u.int(.imp_count, @intCast(n));
+    if (n > 0) {
+        u.f4v(.imp, @intCast(n), &s.imp_buf);
+        u.f2v(.imp_dir, @intCast(n), &s.imp_dir_buf);
+    }
+}
+
 fn upload(handle: ?*anyopaque, program: u32) callconv(.c) void {
     const self = handle orelse return;
     const s: *State = @ptrCast(@alignCast(self));
@@ -446,6 +669,7 @@ fn upload(handle: ?*anyopaque, program: u32) callconv(.c) void {
     s.u.int(.frame, s.frame);
     s.u.f4(.mouse, s.cursor[0], s.cursor[1], 0.0, 0.0);
     setWindows(s, &s.u, s.win_speed);
+    setRotation(s, &s.u, bw * 0.5, bh * 0.5);
     s.prog_a.draw();
     gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
     s.a_cur = aw;
@@ -461,6 +685,7 @@ fn upload(handle: ?*anyopaque, program: u32) callconv(.c) void {
     s.u.int(.frame, s.frame);
     s.u.f4(.mouse, s.cursor[0], s.cursor[1], 0.0, 0.0);
     setWindows(s, &s.u, s.win_speed);
+    setRotation(s, &s.u, bw * 0.5, bh * 0.5);
     s.prog_b.draw();
     gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
     s.b_cur = bnext;
@@ -487,6 +712,7 @@ fn upload(handle: ?*anyopaque, program: u32) callconv(.c) void {
     // speed makes the body velocity effectively zero, so the obstacle only
     // freezes and deflects.
     setWindows(s, &s.u, 1.0e9);
+    setRotation(s, &s.u, bw * 0.5, bh * 0.5);
     s.prog_c.draw();
     gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
     s.c_cur = cnext;
@@ -509,12 +735,19 @@ fn upload(handle: ?*anyopaque, program: u32) callconv(.c) void {
     s.u.f1(.time, s.time * 0.10);
     s.u.int(.frame, s.frame);
     s.u.f4(.mouse, s.cursor[0], s.cursor[1], 0.0, 0.0);
+    setRotation(s, &s.u, bw * 0.5, bh * 0.5);
+    // The impulses are stirred into Buffer D: it is the state the Image pass
+    // reads, so they bend the flow and reach the paint directly.
+    setImpulses(s, &s.u);
     s.prog_d.draw();
     gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0);
     s.d_cur = dnext;
 
     // --- Image: D, colour, C into the host's display program ---------------
     s.u.use(program);
+    // The Image pass turns about the centre of the *surface*, in surface
+    // pixels; the buffer passes turn about the centre of the buffer.
+    setRotation(s, &s.u, s.width * 0.5, s.height * 0.5);
     bindTex(gl.GL_TEXTURE0, s.d[s.d_cur].tex);
     s.u.int(.ch0, 0);
     bindTex(gl.GL_TEXTURE1, s.paint.tex);

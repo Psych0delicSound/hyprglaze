@@ -121,6 +121,10 @@ theme = "Rosé Pine"
 # win_turn   = 0.85  # 0..1: inflow bent into a slide along the window edge
 # win_curl   = 0.25  # 0..1: extra swirl added to that slide
 # win_wall   = 0.6   # 0..1: push ahead of a moving window's bounds
+# impulse     = 1.0  # stirring impulse strength (0 disables)
+# impulse_rate= 0.6  # impulses per second
+# rotate      = 1.0  # whole-screen rotation speed multiplier
+# rotate_speed= 0.12 # max wandering angular velocity (rad/s)
 
 [fur]
 # spacing = 23.0      # follicle spacing in px; finer shimmers and reads as noise

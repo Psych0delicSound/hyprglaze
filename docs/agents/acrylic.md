@@ -67,7 +67,8 @@ these edits, all documented in its header:
   untouched; the dispersion distance is shortened (see *Tuning*).
 - Slow/viscous constants in Buffers A/B/C (see *Tuning* below); the equations
   are untouched.
-
+- A whole-screen rotation and random impulses that stir the flow so the
+  honey keeps moving and bending instead of settling (see *Motion* below).
 ### Inputs
 
 The reference's external textures are not shipped. The port synthesises them
@@ -122,6 +123,33 @@ sampled with repeat/linear filtering, so edge-crossing dispersion taps stay
 continuous. Rendering it once (instead of evaluating the island hashes at every
 one of the 64 dispersion taps) keeps the Image pass at the same cost as the old
 procedural source.
+
+## Motion
+
+flow-ref3 reaches a mostly static pattern. The port adds two things to keep
+the wallpaper alive:
+
+- **Whole-screen rotation** — the component drives a slow, steady angle: one
+  direction only, ramped in with a ~5 s ease and never reversing. The Image
+  pass samples the field at `hgFieldUV` (a rigid pixel-space rotation in uv)
+  so the picture turns. The buffer passes use `hgScreenPx` (rotate pixel
+  coordinates the other way) so a window's hole in the flow stays under the
+  window while the honey turns around it. Window normals and velocities are
+  rotated into the field frame with `hgRotInv()`. Buffers and the paint source
+  use `repeat` wrap; the paint grid is tileable (whole-number cells, `mod`
+  cell ids, 3×3 neighbourhood sampling) to avoid a seam.
+- **Random impulses** — blobs of force are scheduled with exponential random
+  delays (about one every eight seconds) and injected into **Buffer D**
+  (which the Image pass reads). Each impulse is a Gaussian blob with a dipole
+  push along its travel direction and a swirl around its centre; it lives
+  7–11 s, drifts slowly, and its strength follows a quad ease-in-out (a 0.9 s
+  swell, a hold, then a 1.6 s fade) so there is no corner in the force. Up to
+  four are active at once. The forces are added in the field frame after
+  turning through `hgRotInv()`.
+
+Config knobs: `impulse` (strength, default `1.0`), `impulse_rate`
+(impulses/s, default `0.6`), `rotate` (speed multiplier, default `1.0`),
+`rotate_speed` (max rad/s, default `0.12`).
 
 Two finishing touches are borrowed from `weft`: an additive field grain over the
 whole screen (10 Hz reseed, amplitude `0.035`, so the black body has a little
@@ -225,6 +253,12 @@ These are compile-time replacements, so regenerate after editing the script.
   the body (default `0.25`).
 - `win_wall` — `0..1`, push ahead of a moving window's bounds (default `0.6`);
   the velocity is inertia-smoothed (~0.15 s) before it reaches the shader.
+- `impulse` — `0..8`, overall impulse strength (default `1.0`); `0` disables
+  stirring.
+- `impulse_rate` — `0..20`, average impulses per second (default `0.6`).
+- `rotate` — `0..8`, whole-screen rotation speed multiplier (default `1.0`).
+- `rotate_speed` — `0..2`, max wandering angular velocity in rad/s (default
+  `0.12`).
 
 ## Verify
 

@@ -131,6 +131,19 @@ vec3 spectral_jet(float w)
 }
 
 
+// ---- whole-screen rotation ------------------------------------------------
+// The component drives a slow, steady angle: the picture turns, always the
+// same way. `uRotCenter` is the framebuffer centre in pixels.
+uniform vec2 uRotate;     // (cos, sin) of the angle
+uniform vec2 uRotCenter;  // the framebuffer centre, in px
+
+// Counter-clockwise rotation by the angle, and its inverse.
+mat2 hgRotM() { return mat2(uRotate.x, uRotate.y, -uRotate.y, uRotate.x); }
+mat2 hgRotInv() { return mat2(uRotate.x, -uRotate.y, uRotate.y, uRotate.x); }
+
+// A field pixel, expressed in the unrotated screen frame.
+vec2 hgScreenPx(vec2 p) { return hgRotM() * (p - uRotCenter) + uRotCenter; }
+
 // ---- theme paint source (replaces the reference colour texture) ----------
 // Display-only inputs (the host sets these for the Image/display shader).
 uniform vec4 iWindows[32];
@@ -138,6 +151,15 @@ uniform int iWindowCount;
 uniform float iTransition;
 uniform int iFocusedIndex;
 uniform int iPrevIndex;
+
+// The screen turns as a whole. `hgFieldUV` maps a screen uv to the uv the
+// field is sampled at: the picture rotates, but rigidly — the rotation is
+// done in pixels, so circles stay round instead of shearing.
+vec2 hgFieldUV(vec2 uv) {
+    vec2 p = uv * iResolution.xy;
+    vec2 q = hgRotInv() * (p - uRotCenter) + uRotCenter;
+    return q / iResolution.xy;
+}
 
 // uCh1 is the small-island paint field rendered once by the component.
 vec3 hgTheme(vec2 uv) { return texture(uCh1, uv).rgb; }
@@ -304,7 +326,7 @@ vec3 ACESFilm(vec3 x)
 
 void mainImage( out vec4 fragColor, in vec2 fragCoord ){
     vec2 texel = 1. / iResolution.xy;
-    vec2 uv = fragCoord.xy / iResolution.xy;
+    vec2 uv = hgFieldUV(fragCoord.xy / iResolution.xy);
 
     vec2 n  = vec2(0.0, texel.y);
     vec2 e  = vec2(texel.x, 0.0);

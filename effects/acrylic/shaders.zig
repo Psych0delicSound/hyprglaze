@@ -135,6 +135,19 @@ pub const pass_a: [:0]const u8 =
     \\}
     \\
     \\
+    \\// ---- whole-screen rotation ------------------------------------------------
+    \\// The component drives a slow, steady angle: the picture turns, always the
+    \\// same way. `uRotCenter` is the framebuffer centre in pixels.
+    \\uniform vec2 uRotate;     // (cos, sin) of the angle
+    \\uniform vec2 uRotCenter;  // the framebuffer centre, in px
+    \\
+    \\// Counter-clockwise rotation by the angle, and its inverse.
+    \\mat2 hgRotM() { return mat2(uRotate.x, uRotate.y, -uRotate.y, uRotate.x); }
+    \\mat2 hgRotInv() { return mat2(uRotate.x, -uRotate.y, uRotate.y, uRotate.x); }
+    \\
+    \\// A field pixel, expressed in the unrotated screen frame.
+    \\vec2 hgScreenPx(vec2 p) { return hgRotM() * (p - uRotCenter) + uRotCenter; }
+    \\
     \\// ---- window rigid bodies: the flow cannot cross a window ----------------
     \\uniform int uWinCount;
     \\uniform vec4 uWin[32];     // xy = lo, zw = size   (buffer px)
@@ -179,10 +192,14 @@ pub const pass_a: [:0]const u8 =
     \\        // every flow toward the window.
     \\        if (sd > uWinBand) continue;
     \\
-    \\        vec2 nrm = hgBoxNormal(px, lo, hi, r);
+    \\        // The rectangle lives in the screen frame; the flow lives in the
+    \\        // field frame, which the whole screen rotates inside. Turn the
+    \\        // wall's normal and the body's own velocity back into the field
+    \\        // frame before they touch the flow.
+    \\        vec2 nrm = hgRotInv() * hgBoxNormal(px, lo, hi, r);
     \\        float t = clamp(1.0 - sd / max(uWinBand, 1.0), 0.0, 1.0);
     \\
-    \\        vec2 body = uWinVel[i] / max(uWinScale, 1.0);
+    \\        vec2 body = hgRotInv() * (uWinVel[i] / max(uWinScale, 1.0));
     \\        body = length(body) > 1.0 ? normalize(body) : body;
     \\        vec2 rel = v - body;
     \\
@@ -376,8 +393,8 @@ pub const pass_a: [:0]const u8 =
     \\out vec4 hg_fragColor;
     \\void main() {
     \\    mainImage(hg_fragColor, gl_FragCoord.xy);
-    \\    hg_fragColor.xy = hgObstacle(hg_fragColor.xy, gl_FragCoord.xy);
-    \\    hg_fragColor.zw = hgObstacle(hg_fragColor.zw, gl_FragCoord.xy);
+    \\    hg_fragColor.xy = hgObstacle(hg_fragColor.xy, hgScreenPx(gl_FragCoord.xy));
+    \\    hg_fragColor.zw = hgObstacle(hg_fragColor.zw, hgScreenPx(gl_FragCoord.xy));
     \\}
 ;
 
@@ -515,6 +532,19 @@ pub const pass_b: [:0]const u8 =
     \\}
     \\
     \\
+    \\// ---- whole-screen rotation ------------------------------------------------
+    \\// The component drives a slow, steady angle: the picture turns, always the
+    \\// same way. `uRotCenter` is the framebuffer centre in pixels.
+    \\uniform vec2 uRotate;     // (cos, sin) of the angle
+    \\uniform vec2 uRotCenter;  // the framebuffer centre, in px
+    \\
+    \\// Counter-clockwise rotation by the angle, and its inverse.
+    \\mat2 hgRotM() { return mat2(uRotate.x, uRotate.y, -uRotate.y, uRotate.x); }
+    \\mat2 hgRotInv() { return mat2(uRotate.x, -uRotate.y, uRotate.y, uRotate.x); }
+    \\
+    \\// A field pixel, expressed in the unrotated screen frame.
+    \\vec2 hgScreenPx(vec2 p) { return hgRotM() * (p - uRotCenter) + uRotCenter; }
+    \\
     \\// ---- window rigid bodies: the flow cannot cross a window ----------------
     \\uniform int uWinCount;
     \\uniform vec4 uWin[32];     // xy = lo, zw = size   (buffer px)
@@ -559,10 +589,14 @@ pub const pass_b: [:0]const u8 =
     \\        // every flow toward the window.
     \\        if (sd > uWinBand) continue;
     \\
-    \\        vec2 nrm = hgBoxNormal(px, lo, hi, r);
+    \\        // The rectangle lives in the screen frame; the flow lives in the
+    \\        // field frame, which the whole screen rotates inside. Turn the
+    \\        // wall's normal and the body's own velocity back into the field
+    \\        // frame before they touch the flow.
+    \\        vec2 nrm = hgRotInv() * hgBoxNormal(px, lo, hi, r);
     \\        float t = clamp(1.0 - sd / max(uWinBand, 1.0), 0.0, 1.0);
     \\
-    \\        vec2 body = uWinVel[i] / max(uWinScale, 1.0);
+    \\        vec2 body = hgRotInv() * (uWinVel[i] / max(uWinScale, 1.0));
     \\        body = length(body) > 1.0 ? normalize(body) : body;
     \\        vec2 rel = v - body;
     \\
@@ -728,7 +762,7 @@ pub const pass_b: [:0]const u8 =
     \\out vec4 hg_fragColor;
     \\void main() {
     \\    mainImage(hg_fragColor, gl_FragCoord.xy);
-    \\    hg_fragColor.xy = hgObstacle(hg_fragColor.xy, gl_FragCoord.xy);
+    \\    hg_fragColor.xy = hgObstacle(hg_fragColor.xy, hgScreenPx(gl_FragCoord.xy));
     \\}
 ;
 
@@ -866,6 +900,19 @@ pub const pass_c: [:0]const u8 =
     \\}
     \\
     \\
+    \\// ---- whole-screen rotation ------------------------------------------------
+    \\// The component drives a slow, steady angle: the picture turns, always the
+    \\// same way. `uRotCenter` is the framebuffer centre in pixels.
+    \\uniform vec2 uRotate;     // (cos, sin) of the angle
+    \\uniform vec2 uRotCenter;  // the framebuffer centre, in px
+    \\
+    \\// Counter-clockwise rotation by the angle, and its inverse.
+    \\mat2 hgRotM() { return mat2(uRotate.x, uRotate.y, -uRotate.y, uRotate.x); }
+    \\mat2 hgRotInv() { return mat2(uRotate.x, -uRotate.y, uRotate.y, uRotate.x); }
+    \\
+    \\// A field pixel, expressed in the unrotated screen frame.
+    \\vec2 hgScreenPx(vec2 p) { return hgRotM() * (p - uRotCenter) + uRotCenter; }
+    \\
     \\// ---- window rigid bodies: the flow cannot cross a window ----------------
     \\uniform int uWinCount;
     \\uniform vec4 uWin[32];     // xy = lo, zw = size   (buffer px)
@@ -910,10 +957,14 @@ pub const pass_c: [:0]const u8 =
     \\        // every flow toward the window.
     \\        if (sd > uWinBand) continue;
     \\
-    \\        vec2 nrm = hgBoxNormal(px, lo, hi, r);
+    \\        // The rectangle lives in the screen frame; the flow lives in the
+    \\        // field frame, which the whole screen rotates inside. Turn the
+    \\        // wall's normal and the body's own velocity back into the field
+    \\        // frame before they touch the flow.
+    \\        vec2 nrm = hgRotInv() * hgBoxNormal(px, lo, hi, r);
     \\        float t = clamp(1.0 - sd / max(uWinBand, 1.0), 0.0, 1.0);
     \\
-    \\        vec2 body = uWinVel[i] / max(uWinScale, 1.0);
+    \\        vec2 body = hgRotInv() * (uWinVel[i] / max(uWinScale, 1.0));
     \\        body = length(body) > 1.0 ? normalize(body) : body;
     \\        vec2 rel = v - body;
     \\
@@ -1039,7 +1090,7 @@ pub const pass_c: [:0]const u8 =
     \\out vec4 hg_fragColor;
     \\void main() {
     \\    mainImage(hg_fragColor, gl_FragCoord.xy);
-    \\    hg_fragColor.xy = hgObstacle(hg_fragColor.xy, gl_FragCoord.xy);
+    \\    hg_fragColor.xy = hgObstacle(hg_fragColor.xy, hgScreenPx(gl_FragCoord.xy));
     \\}
 ;
 
@@ -1177,6 +1228,49 @@ pub const pass_d: [:0]const u8 =
     \\}
     \\
     \\
+    \\// ---- whole-screen rotation ------------------------------------------------
+    \\// The component drives a slow, steady angle: the picture turns, always the
+    \\// same way. `uRotCenter` is the framebuffer centre in pixels.
+    \\uniform vec2 uRotate;     // (cos, sin) of the angle
+    \\uniform vec2 uRotCenter;  // the framebuffer centre, in px
+    \\
+    \\// Counter-clockwise rotation by the angle, and its inverse.
+    \\mat2 hgRotM() { return mat2(uRotate.x, uRotate.y, -uRotate.y, uRotate.x); }
+    \\mat2 hgRotInv() { return mat2(uRotate.x, -uRotate.y, uRotate.y, uRotate.x); }
+    \\
+    \\// A field pixel, expressed in the unrotated screen frame.
+    \\vec2 hgScreenPx(vec2 p) { return hgRotM() * (p - uRotCenter) + uRotCenter; }
+    \\
+    \\// ---- random impulses: the honey keeps being stirred ----------------------
+    \\uniform vec4 uImpulse[4];     // xy = centre (px), z = radius (px), w = strength
+    \\uniform vec2 uImpulseDir[4];  // unit travel direction (screen frame)
+    \\uniform int uImpulseCount;
+    \\
+    \\const float HG_IMP_PUSH  = 0.020;  // transport along the travel direction
+    \\const float HG_IMP_DIP   = 0.030;  // dipole: push ahead, draw in behind
+    \\const float HG_IMP_SWIRL = 0.045;  // vortex around the blob centre
+    \\
+    \\vec2 hgImpulseForce(vec2 p) {
+    \\    vec2 f = vec2(0.0);
+    \\    for (int i = 0; i < 4; i++) {
+    \\        if (i >= uImpulseCount) break;
+    \\        vec4 im = uImpulse[i];
+    \\        if (im.w <= 0.0) continue;
+    \\        vec2 dir = uImpulseDir[i];
+    \\        vec2 d = p - im.xy;
+    \\        float r = max(im.z, 1.0);
+    \\        float q = length(d) / r;
+    \\        if (q > 2.5) continue;
+    \\        float g = exp(-q * q);
+    \\        float along = dot(d, dir) / r;
+    \\        // Transport + dipole along the travel direction.
+    \\        f += dir * (g * (HG_IMP_PUSH + along * HG_IMP_DIP));
+    \\        // Vortex around the blob's centre: a quarter turn of `d`.
+    \\        f += vec2(-d.y, d.x) * (g * HG_IMP_SWIRL / r);
+    \\    }
+    \\    return f;
+    \\}
+    \\
     \\                                                                                                                                                                                                                                                                                        // See Image tab for details, also visit:
     \\//
     \\// https://xemantic.github.io/shader-web-background/
@@ -1303,6 +1397,7 @@ pub const pass_d: [:0]const u8 =
     \\out vec4 hg_fragColor;
     \\void main() {
     \\    mainImage(hg_fragColor, gl_FragCoord.xy);
+    \\    hg_fragColor.xy += hgRotInv() * hgImpulseForce(hgScreenPx(gl_FragCoord.xy));
     \\}
 ;
 
@@ -1318,38 +1413,56 @@ pub const pass_paint: [:0]const u8 =
     \\    return fract(p.x * p.y);
     \\}
     \\
-    \\// One layer of small, randomly placed paint islands. Each grid cell holds a
-    \\// single jittered, randomly rotated ellipse; the hash makes the layout stable
-    \\// between frames but different from one cell to the next. Some cells are left
-    \\// empty so the stream sizes and spacing stay irregular.
-    \\float hgIslands(vec2 p, float scale, float seed, float size) {
-    \\    vec2 cell = p * scale + seed;
-    \\    vec2 id = floor(cell);
-    \\    vec2 f = fract(cell) - 0.5;
+    \\// One layer of small, randomly placed paint islands.
+    \\//
+    \\// `rows` is the number of cells across the height; the width gets the
+    \\// matching whole number of cells, so the cells stay square and the layer
+    \\// tiles. `seed` is an integer offset in cell space (a fractional one would
+    \\// break the wrap). Each grid cell holds a single jittered, randomly rotated
+    \\// ellipse; the hash makes the layout stable between frames but different
+    \\// from one cell to the next. Some cells are left empty so the stream sizes
+    \\// and spacing stay irregular.
+    \\float hgIslands(vec2 uv, float rows, float seed, float size) {
+    \\    float ar = iResolution.x / max(iResolution.y, 1.0);
+    \\    float cols = floor(rows * ar + 0.5);
+    \\    vec2 grid = vec2(cols, rows);
     \\
-    \\    float h0 = hgHash21(id + seed * 1.7);
-    \\    float h1 = hgHash21(id + seed * 3.1 + 11.0);
-    \\    float h2 = hgHash21(id + seed * 5.3 + 23.0);
-    \\    float h3 = hgHash21(id + seed * 7.9 + 41.0);
-    \\    float h4 = hgHash21(id + seed * 9.7 + 59.0);
+    \\    vec2 cell = uv * grid + seed;
+    \\    vec2 base = floor(cell);
+    \\    vec2 f = cell - base;
     \\
-    \\    vec2 q = f - (vec2(h0, h1) - 0.5) * 0.55;
-    \\    float a = h2 * 6.2831853;
-    \\    q = mat2(cos(a), -sin(a), sin(a), cos(a)) * q;
+    \\    float paint = 0.0;
+    \\    for (int j = -1; j <= 1; j++) {
+    \\        for (int i = -1; i <= 1; i++) {
+    \\            vec2 off = vec2(float(i), float(j));
+    \\            vec2 id = mod(base + off, grid);
     \\
-    \\    // Slightly elongated so the island reads as a short flow, not a dot.
-    \\    vec2 e = q / vec2(size * (0.7 + 0.9 * h3), size);
-    \\    float d = length(e);
-    \\    float b = 1.0 - smoothstep(0.35, 1.0, d);
-    \\    return b * b * (0.55 + 0.45 * h3) * step(0.22, h4);
+    \\            float h0 = hgHash21(id + seed * 1.7);
+    \\            float h1 = hgHash21(id + seed * 3.1 + 11.0);
+    \\            float h2 = hgHash21(id + seed * 5.3 + 23.0);
+    \\            float h3 = hgHash21(id + seed * 7.9 + 41.0);
+    \\            float h4 = hgHash21(id + seed * 9.7 + 59.0);
+    \\
+    \\            vec2 q = (f - off - 0.5) - (vec2(h0, h1) - 0.5) * 0.55;
+    \\            float a = h2 * 6.2831853;
+    \\            q = mat2(cos(a), -sin(a), sin(a), cos(a)) * q;
+    \\
+    \\            // Slightly elongated so the island reads as a short flow, not a dot.
+    \\            vec2 e = q / vec2(size * (0.7 + 0.9 * h3), size);
+    \\            float d = length(e);
+    \\            float b = 1.0 - smoothstep(0.35, 1.0, d);
+    \\            b = b * b * (0.55 + 0.45 * h3) * step(0.22, h4);
+    \\            paint = max(paint, b);
+    \\        }
+    \\    }
+    \\    return paint;
     \\}
     \\
     \\float hgPaint(vec2 uv) {
-    \\    vec2 p = (uv - 0.5) * vec2(iResolution.x / max(iResolution.y, 1.0), 1.0);
     \\    float paint = 0.0;
-    \\    paint = max(paint, hgIslands(p, 4.5, 0.0, 0.28));
-    \\    paint = max(paint, hgIslands(p, 8.0, 3.0, 0.20));
-    \\    paint = max(paint, hgIslands(p, 15.0, 7.0, 0.14));
+    \\    paint = max(paint, hgIslands(uv, 5.0, 0.0, 0.28));
+    \\    paint = max(paint, hgIslands(uv, 8.0, 3.0, 0.20));
+    \\    paint = max(paint, hgIslands(uv, 15.0, 7.0, 0.14));
     \\    return paint;
     \\}
     \\

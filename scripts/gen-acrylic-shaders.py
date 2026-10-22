@@ -25,6 +25,13 @@ The pass bodies and the Common tab are copied verbatim, with these additions:
     light-blue band. The displacement maths is untouched.
   * Slow/viscous `tune()` constants in Buffers A/B/C (advection distances and
     timestep down, fluid inertia up). The equations are untouched.
+  * A whole-screen rotation (`ROT`): the component drives a slowly wandering
+    angle; the Image pass turns its sampling with it, so the picture rotates,
+    and the buffer passes turn their pixel coordinates the other way, so a
+    window keeps its hole in the flow while the honey turns around it.
+  * Random impulses (`IMPULSE`): the component schedules a few stirring blobs
+    that shove the flow field around, so the honey keeps rearranging instead
+    of settling into one static pattern.
 
 Usage:  scripts/gen-acrylic-shaders.py [REF_DIR]
         (default $HOME/Works/shaders/desktop)
@@ -56,6 +63,32 @@ uniform vec3 iPaletteBg;
 uniform vec3 iPaletteFg;
 """
 
+# Whole-screen rotation. The component drives a slow, steady angle (one
+# direction, eased in), and every pass agrees on where the picture's
+# "up" is:
+#
+#   * The Image pass samples the field at the rotated uv, so the honey turns.
+#   * The buffer passes express their pixel coordinates in the *screen* frame
+#     (`hgScreenPx`), i.e. rotated the other way, so a window's hole in the
+#     flow stays under the window while the honey turns around it.
+#
+# The rotation is rigid on screen: the aspect correction in `hgFieldUV` keeps
+# circles round instead of shearing them.
+ROT = """
+// ---- whole-screen rotation ------------------------------------------------
+// The component drives a slow, steady angle: the picture turns, always the
+// same way. `uRotCenter` is the framebuffer centre in pixels.
+uniform vec2 uRotate;     // (cos, sin) of the angle
+uniform vec2 uRotCenter;  // the framebuffer centre, in px
+
+// Counter-clockwise rotation by the angle, and its inverse.
+mat2 hgRotM() { return mat2(uRotate.x, uRotate.y, -uRotate.y, uRotate.x); }
+mat2 hgRotInv() { return mat2(uRotate.x, -uRotate.y, uRotate.y, uRotate.x); }
+
+// A field pixel, expressed in the unrotated screen frame.
+vec2 hgScreenPx(vec2 p) { return hgRotM() * (p - uRotCenter) + uRotCenter; }
+"""
+
 # Window rigid bodies. A window is a solid, impermeable body in the flow. The
 # base is the magnet-fix projection: the inward normal component of the field is
 # removed, so flow bends around the window instead of crossing it. On top of
@@ -68,6 +101,12 @@ uniform vec3 iPaletteFg;
 #     around the body;
 #   * `uWinNoSlip` optionally drags the field toward rest at the surface.
 # Rectangles arrive in *buffer* pixels.
+#
+# `px` is the pixel in the *screen* frame (the caller rotates it), because the
+# rectangles are given in that frame. The wall's normal and the window's own
+# velocity are turned back into the field frame, where the flow lives.
+#
+# The block needs the ROT block above it (`hgRotInv`).
 OBSTACLE = """
 // ---- window rigid bodies: the flow cannot cross a window ----------------
 uniform int uWinCount;
@@ -113,10 +152,14 @@ vec2 hgObstacle(vec2 v, vec2 px) {
         // every flow toward the window.
         if (sd > uWinBand) continue;
 
-        vec2 nrm = hgBoxNormal(px, lo, hi, r);
+        // The rectangle lives in the screen frame; the flow lives in the
+        // field frame, which the whole screen rotates inside. Turn the
+        // wall's normal and the body's own velocity back into the field
+        // frame before they touch the flow.
+        vec2 nrm = hgRotInv() * hgBoxNormal(px, lo, hi, r);
         float t = clamp(1.0 - sd / max(uWinBand, 1.0), 0.0, 1.0);
 
-        vec2 body = uWinVel[i] / max(uWinScale, 1.0);
+        vec2 body = hgRotInv() * (uWinVel[i] / max(uWinScale, 1.0));
         body = length(body) > 1.0 ? normalize(body) : body;
         vec2 rel = v - body;
 
@@ -155,6 +198,56 @@ vec2 hgObstacle(vec2 v, vec2 px) {
 }
 """
 
+# Random impulses. The reference's honey settles into one static pattern after
+# a minute; a wallpaper has to keep moving. The component schedules a few
+# blobs that stir the flow, and each blob is three forces superposed:
+#
+#   * a transport push along its travel direction, so the blob drags fluid
+#     with it;
+#   * a dipole along the same direction (fluid is pushed ahead of the blob and
+#     drawn in behind it), which is what makes the blob *stir* as it travels;
+#   * a vortex around the blob's centre, which is what makes the flow *bend*
+#     instead of only sliding.
+#
+# The force is evaluated in the screen frame (the blob has a screen position)
+# and the caller turns it into the field frame with `hgRotInv`.
+#
+# The blob is a Gaussian bump of radius `r`; the constants below set how hard
+# each part pushes, in field units (Buffer D's displacement field lives in
+# [-1, 1], and the Image pass turns one unit into a displacement of
+# DISP_SCALE screen widths).
+IMPULSE = """
+// ---- random impulses: the honey keeps being stirred ----------------------
+uniform vec4 uImpulse[4];     // xy = centre (px), z = radius (px), w = strength
+uniform vec2 uImpulseDir[4];  // unit travel direction (screen frame)
+uniform int uImpulseCount;
+
+const float HG_IMP_PUSH  = 0.020;  // transport along the travel direction
+const float HG_IMP_DIP   = 0.030;  // dipole: push ahead, draw in behind
+const float HG_IMP_SWIRL = 0.045;  // vortex around the blob centre
+
+vec2 hgImpulseForce(vec2 p) {
+    vec2 f = vec2(0.0);
+    for (int i = 0; i < 4; i++) {
+        if (i >= uImpulseCount) break;
+        vec4 im = uImpulse[i];
+        if (im.w <= 0.0) continue;
+        vec2 dir = uImpulseDir[i];
+        vec2 d = p - im.xy;
+        float r = max(im.z, 1.0);
+        float q = length(d) / r;
+        if (q > 2.5) continue;
+        float g = exp(-q * q);
+        float along = dot(d, dir) / r;
+        // Transport + dipole along the travel direction.
+        f += dir * (g * (HG_IMP_PUSH + along * HG_IMP_DIP));
+        // Vortex around the blob's centre: a quarter turn of `d`.
+        f += vec2(-d.y, d.x) * (g * HG_IMP_SWIRL / r);
+    }
+    return f;
+}
+"""
+
 # Paint source. It stands in for the reference's colour texture: a static
 # field of small, randomly placed islands rather than one continuous vein
 # network. Rendered once at buffer resolution into `uCh1` (see effect.zig), so
@@ -162,6 +255,13 @@ vec2 hgObstacle(vec2 v, vec2 px) {
 # a procedural source per tap. The scattered islands keep the idle field from
 # collapsing into a single screen-spanning flow, and the flow's own displacement
 # bends them into short, distinct streams that collide and slide past each other.
+#
+# The source has to *tile*: the whole screen rotates, so the rotated picture
+# samples past the edge of the texture and would show a seam. The cell grid is
+# therefore a whole number of cells across the texture and the cell ids wrap
+# with `mod`. An island may reach into the neighbouring cells, so the
+# three-by-three neighbourhood is evaluated and the strongest island wins —
+# otherwise an island would be cut in half at the seam.
 PAINT = """
 #version 300 es
 precision highp float;
@@ -173,38 +273,56 @@ float hgHash21(vec2 p) {
     return fract(p.x * p.y);
 }
 
-// One layer of small, randomly placed paint islands. Each grid cell holds a
-// single jittered, randomly rotated ellipse; the hash makes the layout stable
-// between frames but different from one cell to the next. Some cells are left
-// empty so the stream sizes and spacing stay irregular.
-float hgIslands(vec2 p, float scale, float seed, float size) {
-    vec2 cell = p * scale + seed;
-    vec2 id = floor(cell);
-    vec2 f = fract(cell) - 0.5;
+// One layer of small, randomly placed paint islands.
+//
+// `rows` is the number of cells across the height; the width gets the
+// matching whole number of cells, so the cells stay square and the layer
+// tiles. `seed` is an integer offset in cell space (a fractional one would
+// break the wrap). Each grid cell holds a single jittered, randomly rotated
+// ellipse; the hash makes the layout stable between frames but different
+// from one cell to the next. Some cells are left empty so the stream sizes
+// and spacing stay irregular.
+float hgIslands(vec2 uv, float rows, float seed, float size) {
+    float ar = iResolution.x / max(iResolution.y, 1.0);
+    float cols = floor(rows * ar + 0.5);
+    vec2 grid = vec2(cols, rows);
 
-    float h0 = hgHash21(id + seed * 1.7);
-    float h1 = hgHash21(id + seed * 3.1 + 11.0);
-    float h2 = hgHash21(id + seed * 5.3 + 23.0);
-    float h3 = hgHash21(id + seed * 7.9 + 41.0);
-    float h4 = hgHash21(id + seed * 9.7 + 59.0);
+    vec2 cell = uv * grid + seed;
+    vec2 base = floor(cell);
+    vec2 f = cell - base;
 
-    vec2 q = f - (vec2(h0, h1) - 0.5) * 0.55;
-    float a = h2 * 6.2831853;
-    q = mat2(cos(a), -sin(a), sin(a), cos(a)) * q;
+    float paint = 0.0;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            vec2 off = vec2(float(i), float(j));
+            vec2 id = mod(base + off, grid);
 
-    // Slightly elongated so the island reads as a short flow, not a dot.
-    vec2 e = q / vec2(size * (0.7 + 0.9 * h3), size);
-    float d = length(e);
-    float b = 1.0 - smoothstep(0.35, 1.0, d);
-    return b * b * (0.55 + 0.45 * h3) * step(0.22, h4);
+            float h0 = hgHash21(id + seed * 1.7);
+            float h1 = hgHash21(id + seed * 3.1 + 11.0);
+            float h2 = hgHash21(id + seed * 5.3 + 23.0);
+            float h3 = hgHash21(id + seed * 7.9 + 41.0);
+            float h4 = hgHash21(id + seed * 9.7 + 59.0);
+
+            vec2 q = (f - off - 0.5) - (vec2(h0, h1) - 0.5) * 0.55;
+            float a = h2 * 6.2831853;
+            q = mat2(cos(a), -sin(a), sin(a), cos(a)) * q;
+
+            // Slightly elongated so the island reads as a short flow, not a dot.
+            vec2 e = q / vec2(size * (0.7 + 0.9 * h3), size);
+            float d = length(e);
+            float b = 1.0 - smoothstep(0.35, 1.0, d);
+            b = b * b * (0.55 + 0.45 * h3) * step(0.22, h4);
+            paint = max(paint, b);
+        }
+    }
+    return paint;
 }
 
 float hgPaint(vec2 uv) {
-    vec2 p = (uv - 0.5) * vec2(iResolution.x / max(iResolution.y, 1.0), 1.0);
     float paint = 0.0;
-    paint = max(paint, hgIslands(p, 4.5, 0.0, 0.28));
-    paint = max(paint, hgIslands(p, 8.0, 3.0, 0.20));
-    paint = max(paint, hgIslands(p, 15.0, 7.0, 0.14));
+    paint = max(paint, hgIslands(uv, 5.0, 0.0, 0.28));
+    paint = max(paint, hgIslands(uv, 8.0, 3.0, 0.20));
+    paint = max(paint, hgIslands(uv, 15.0, 7.0, 0.14));
     return paint;
 }
 
@@ -217,6 +335,8 @@ void main() {
 # The Image pass samples the rendered paint source. The final stage maps the
 # dispersed intensity onto the theme's black / deep-blue / light-blue / white
 # ramp.
+#
+# The block needs the ROT block above it (`hgRotInv`, `uRotCenter`).
 THEME = """
 // ---- theme paint source (replaces the reference colour texture) ----------
 // Display-only inputs (the host sets these for the Image/display shader).
@@ -225,6 +345,15 @@ uniform int iWindowCount;
 uniform float iTransition;
 uniform int iFocusedIndex;
 uniform int iPrevIndex;
+
+// The screen turns as a whole. `hgFieldUV` maps a screen uv to the uv the
+// field is sampled at: the picture rotates, but rigidly — the rotation is
+// done in pixels, so circles stay round instead of shearing.
+vec2 hgFieldUV(vec2 uv) {
+    vec2 p = uv * iResolution.xy;
+    vec2 q = hgRotInv() * (p - uRotCenter) + uRotCenter;
+    return q / iResolution.xy;
+}
 
 // uCh1 is the small-island paint field rendered once by the component.
 vec3 hgTheme(vec2 uv) { return texture(uCh1, uv).rgb; }
@@ -336,6 +465,16 @@ def tune(fname, text):
 
 def theme_image(body):
     """Make the Image pass sample the palette instead of the colour texture."""
+    # The whole screen turns: sample the field through the rotation, so the
+    # picture rotates rigidly (the aspect correction happens in pixels).
+    body, n = re.subn(
+        r"vec2 uv = fragCoord\.xy / iResolution\.xy;",
+        "vec2 uv = hgFieldUV(fragCoord.xy / iResolution.xy);",
+        body,
+        count=1,
+    )
+    if n != 1:
+        raise SystemExit("flow-ref3.frag: no `vec2 uv = ...` line to rotate")
     body = body.replace(
         "texture(iChannel1, uv + dispNorm * disp * wl).xyz",
         "hgTheme(uv + dispNorm * disp * wl)",
@@ -393,17 +532,24 @@ def zstr(name, value):
 
 
 PASSES = [
-    ("pass_a", "flow-ref3-buffer-a.frag", [
-        "hg_fragColor.xy = hgObstacle(hg_fragColor.xy, gl_FragCoord.xy);",
-        "hg_fragColor.zw = hgObstacle(hg_fragColor.zw, gl_FragCoord.xy);",
+    # The buffer passes express their pixel in the screen frame (the windows
+    # are given in that frame), so the flow bends around a window that stays
+    # put while the honey turns around it.
+    ("pass_a", "flow-ref3-buffer-a.frag", ROT + OBSTACLE, [
+        "hg_fragColor.xy = hgObstacle(hg_fragColor.xy, hgScreenPx(gl_FragCoord.xy));",
+        "hg_fragColor.zw = hgObstacle(hg_fragColor.zw, hgScreenPx(gl_FragCoord.xy));",
     ]),
-    ("pass_b", "flow-ref3-buffer-b.frag", [
-        "hg_fragColor.xy = hgObstacle(hg_fragColor.xy, gl_FragCoord.xy);",
+    ("pass_b", "flow-ref3-buffer-b.frag", ROT + OBSTACLE, [
+        "hg_fragColor.xy = hgObstacle(hg_fragColor.xy, hgScreenPx(gl_FragCoord.xy));",
     ]),
-    ("pass_c", "flow-ref3-buffer-c.frag", [
-        "hg_fragColor.xy = hgObstacle(hg_fragColor.xy, gl_FragCoord.xy);",
+    ("pass_c", "flow-ref3-buffer-c.frag", ROT + OBSTACLE, [
+        "hg_fragColor.xy = hgObstacle(hg_fragColor.xy, hgScreenPx(gl_FragCoord.xy));",
     ]),
-    ("pass_d", "flow-ref3-buffer-d.frag", []),
+    # Buffer D is the state the Image pass reads, so the impulses are stirred
+    # in here: they bend the flow and they reach the paint directly.
+    ("pass_d", "flow-ref3-buffer-d.frag", ROT + IMPULSE, [
+        "hg_fragColor.xy += hgRotInv() * hgImpulseForce(hgScreenPx(gl_FragCoord.xy));",
+    ]),
 ]
 
 
@@ -413,13 +559,13 @@ def main():
         "//! passes by scripts/gen-acrylic-shaders.py. Do not hand-edit.",
         "",
     ]
-    for name, fname, post in PASSES:
-        out.append(zstr(name, build(fname, OBSTACLE if post else "", post)))
+    for name, fname, extra, post in PASSES:
+        out.append(zstr(name, build(fname, extra, post)))
     out.append(zstr("pass_paint", PAINT))
     with open(os.path.join(OUT, "shaders.zig"), "w") as f:
         f.write("\n".join(out))
     with open(os.path.join(OUT, "acrylic.frag"), "w") as f:
-        f.write(build("flow-ref3.frag", THEME))
+        f.write(build("flow-ref3.frag", ROT + THEME))
     print("wrote shaders.zig and acrylic.frag from", SRC)
 
 
